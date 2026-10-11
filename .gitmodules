@@ -1,0 +1,3 @@
+[submodule "external/GuayabaTUIEngine"]
+	path = external/GuayabaTUIEngine
+	url = https://github.com/CebGIN/GuayabaTUIEngine.git

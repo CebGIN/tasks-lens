@@ -315,21 +315,46 @@ the right edge.
 
 ### Build note
 
-`cmake --build build` now works: the submodule is re-pinned to the engine tag
-with the input API (v1.1.1-alpha). Earlier in Phase C it was verified by
-compiling `src/` directly against the engine working copy, before the tag existed.
+`cmake --build build` works against the pinned submodule (currently
+`v1.2.1-alpha`). Earlier in Phase C it was verified by compiling `src/` directly
+against the engine working copy, before the tags existed.
 
 ---
 
-## 10. New engine controls (repo `GuayabaTUIEngine`, pending pin)
+## 10. Engine controls added for the app (repo `GuayabaTUIEngine`)
 
 The app consumes the engine through the **`external/GuayabaTUIEngine` submodule**,
-pinned to a tag. New generic controls are built in the engine's own working copy
-(`/home/cebrian/Documentos/Code/GuayabaTUIEngine`) and become usable here only
-after the engine is committed/tagged/pushed and the pin advances
-(`git -C external/GuayabaTUIEngine checkout <tag>` then
-`git add external/GuayabaTUIEngine`). Until then, features that need them are
-blocked.
+pinned to a tag (currently `v1.2.1-alpha`). New generic controls are built in the
+engine's own working copy (`/home/cebrian/Documentos/Code/GuayabaTUIEngine`) and
+become usable here only after the engine is committed/tagged/pushed and the pin
+advances (`git -C external/GuayabaTUIEngine checkout <tag>` then
+`git add external/GuayabaTUIEngine`).
+
+`LineEdit`, `Graph` and `ListView` (below) landed in `v1.2.0-alpha`; the codepoint
+text fix (below) in `v1.2.1-alpha`.
+
+### Text rendering: one cell per codepoint (engine ≥ v1.2.1-alpha)
+
+The engine's grid is monospace and one **codepoint** is one cell, whatever its
+UTF-8 length. Both measuring and drawing used to count **bytes**, so a 3-byte
+glyph (`—`, `↑`, `…`) reserved three columns and landed in three buffer cells;
+the terminal draws it as a single column, leaving a two-cell hole and shifting
+everything after it (the title and hotkey lines were the visible cases). Fixed in
+`v1.2.1-alpha`:
+
+- `guayaba::decode_utf8(value, index, codepoint)` and
+  `guayaba::text_width(text)` live in `include/guayaba/Core/Utf8.hpp`
+  (header-only). A malformed sequence is reported as one byte, so a bad string
+  cannot desync a walk.
+- `ConsoleRenderer::put_text` and `TextWrap` (`wrap` / `measure_text`) now count
+  codepoints; `ListView` and `LineEdit` use the shared decoder instead of their
+  private copies.
+- Guarded by the headless engine test `tests/text_rendering.cpp`.
+
+Practical rule for the app: a non-ASCII glyph is one cell, so `set_fit_content`
+widths and the fixed table columns line up with what the terminal shows.
+East-Asian wide characters are still treated as one cell — the engine assumes a
+1-cell-per-codepoint grid.
 
 ### `LineEdit` (built, verified in the engine)
 
@@ -397,7 +422,8 @@ Selectable vertical list: `guayaba::ListView : Control`, in
 - A `TreeView`: the spec asks for a parent→child *view*, not collapse/expand. A
   flattened, indented `ListView` covers it, so a dedicated tree control would be
   scope the spec does not require.
-- A modal `Dialog`: the force-kill confirmation is already handled on the bottom
-  status line (`[y/N]`), so a modal is not needed for spec 14.
+- A modal `Dialog`: the force-kill confirmation is a small overlay built from the
+  ordinary container/button nodes with a Yes/No pair (see §9), so a dedicated
+  dialog control is not needed for spec 14.
 
 

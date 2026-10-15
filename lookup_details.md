@@ -246,10 +246,21 @@ Each backend `.cpp` is `#ifdef`-guarded; the consumer `CMakeLists.txt` globs
     centred with `Button::set_text_align(TextAlign::Center)` (engine ≥ v1.1.2-alpha;
     Left/Center/Right, moves the block without changing wrap or minimum). Row
     cells stay left-aligned.
+  - **Command marquee** (`src/Scripts/marquee.h`): the selected row's COMMAND cell
+    is the one that can be wider than its column, so `render(procs, delta_time)`
+    shows it as a marquee — a `width`-cell window that steps one codepoint every
+    200 ms and wraps around through a 3-space gap, so the whole command can be
+    read without widening the column. It is codepoint-aware
+    (`guayaba::decode_utf8`), so a multi-byte glyph is one cell and is never
+    split; every non-selected row and a command that already fits are padded /
+    truncated exactly as before. The marquee is a plain helper owned by the
+    controller, not an engine `Script` — the table's script slot is sealed by
+    `TableController`, and the clock belongs to the selection, not to one label.
 - **`monitor.h`** — `Script<Node>` on the **root**. Owns `ProcessSource`,
   `CpuSampler`, `SystemInfo`, the snapshot, and the summary/selection/status
-  labels. Every frame: sort by the table's sort state → `table->render(procs)`
-  → mirror the cursor into the `Selected:` label. Every **interval** (default
+  labels. Every frame: sort by the table's sort state →
+  `table->render(procs, delta_time)` → mirror the cursor into the `Selected:`
+  label. Every **interval** (default
   1 s, `i` cycles 1/2/5/10): re-read `/proc` + sample + update summary. Runs
   after controls, so it only sees keys nothing else consumed.
   - **Navigation** (selection): `↑/↓` move the cursor one row, `PgUp/PgDn` a page,
@@ -312,6 +323,16 @@ overlay header has the same requirement. A label whose text can be long (the
 `Selected:` line, which carries a command path) must also be truncated: its
 `fit_content` minimum would otherwise exceed the row and shove the buttons off
 the right edge.
+
+A long `fit_content` label does not merely clip: a container's size floors to
+its children's minimum, so a full-width line wider than the screen grows the
+whole layout `VBox` and pushes **every** right-aligned control — the search bar's
+`Clear`, the toolbar buttons — past the right edge (this is what a longer hotkey
+hint exposed: `Clear` landed at x=126 on a 120-column screen and stopped
+clicking). The help/status line is the one that can get long (hotkeys + the
+active filter), so the `Monitor` clips the status and summary lines to the
+screen width (`fit_width` → `TableController::screen_cols()`) before setting
+them. `screen_cols()` reuses the controller's `TIOCGWINSZ` terminal.
 
 ### Build note
 

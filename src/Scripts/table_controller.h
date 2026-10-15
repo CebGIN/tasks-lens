@@ -13,6 +13,7 @@
 
 #include "Data/process_info.h"
 #include "Scripts/format.h"
+#include "Scripts/marquee.h"
 
 namespace tasks_lens {
 
@@ -101,6 +102,7 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
         terminal_(guayaba::create_system_terminal()) {
     for (size_t i = 0; i < columns_.size(); ++i) {
       if (columns_[i].fills) flex_index_ = static_cast<int>(i);
+      if (columns_[i].key == "command") marquee_index_ = static_cast<int>(i);
     }
   }
 
@@ -129,6 +131,14 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
   }
 
   int capacity() const { return capacity_; }
+
+  // The terminal's column count, or 0 when it cannot be read. The Monitor uses
+  // it to keep the status/summary lines from widening the layout: a fit_content
+  // label wider than the screen grows the whole layout VBox, which pushes the
+  // toolbar's right-aligned buttons off the edge.
+  int screen_cols() const {
+    return terminal_ ? terminal_->get_screen_size({0, 0}).x : 0;
+  }
 
   // --- Selection ------------------------------------------------------------
 
@@ -176,8 +186,9 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
   }
 
   // Writes the current window of `procs` into the row labels. Call once per
-  // frame after sorting, so sort and scroll feel instant.
-  void render(const std::vector<ProcessInfo>& procs) {
+  // frame after sorting, so sort and scroll feel instant. `delta_time` drives the
+  // selected row's command marquee.
+  void render(const std::vector<ProcessInfo>& procs, double delta_time) {
     ensure_capacity();
 
     const int max_offset = std::max(0, static_cast<int>(procs.size()) - capacity_);
@@ -202,6 +213,19 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
       offset_ = std::max(0, std::min(offset_, max_offset));
     }
 
+    // The selected row's command is the one cell that can be wider than its
+    // column, so it is shown as a marquee that cycles the full text through the
+    // window. Advanced once per frame here, not per cell, so the clock is a
+    // property of the selection rather than of any one label.
+    if (marquee_index_ >= 0 && selected_index_ >= 0 &&
+        selected_index_ < static_cast<int>(procs.size())) {
+      marquee_.set(procs[static_cast<std::size_t>(selected_index_)].command,
+                   columns_[static_cast<std::size_t>(marquee_index_)].width);
+      marquee_.advance(delta_time);
+    } else {
+      marquee_.set("", 0);
+    }
+
     for (size_t c = 0; c < columns_.size(); ++c) {
       const Column& column = columns_[c];
       for (int i = 0; i < capacity_; ++i) {
@@ -214,9 +238,13 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
         bool selected = false;
         if (index < static_cast<int>(procs.size())) {
           const ProcessInfo& proc = procs[static_cast<std::size_t>(index)];
-          text = cell_text(proc, column.key, column.width);
           color = row_color(proc);
           selected = index == selected_index_;
+          if (selected && static_cast<int>(c) == marquee_index_) {
+            text = marquee_.visible();
+          } else {
+            text = cell_text(proc, column.key, column.width);
+          }
         } else {
           text = pad("", column.width);
         }
@@ -374,6 +402,11 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
   int capacity_ = 0;
   int offset_ = 0;
   int flex_index_ = -1;
+  // Index of the COMMAND column, whose selected cell scrolls; -1 if there is
+  // none. Set once from the column list.
+  int marquee_index_ = -1;
+  // The scroll state for that one cell.
+  Marquee marquee_;
   // The cursor. 0 means "nothing"; PID is unique, so it survives a re-sort.
   // selected_index_ is derived from it every frame in render().
   int selected_pid_ = 0;

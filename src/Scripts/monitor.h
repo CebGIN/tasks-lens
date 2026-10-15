@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include <guayaba/Core/Utf8.hpp>
 #include <guayaba/Guayaba.hpp>
 
 #include "Data/cpu_sampler.h"
@@ -136,8 +137,7 @@ class Monitor : public guayaba::Script<guayaba::Node> {
     // Follows the search bar's focus so a click into it starts filtering.
     sync_search_focus();
 
-
-    if (table_controller_ != nullptr) table_controller_->render(visible_);
+    if (table_controller_ != nullptr) table_controller_->render(visible_, delta_time);
     update_selection();
     // Button enablement and the live Sort/Interval labels track the selection and
     // the sort/interval state, which can change from a key this same frame.
@@ -153,7 +153,7 @@ class Monitor : public guayaba::Script<guayaba::Node> {
     if (confirm_pid_ == 0 && message_timer_ > 0.0) {
       message_timer_ -= delta_time;
       if (message_timer_ <= 0.0 && status_.get() != nullptr) {
-        status_.get()->set_text(help_line());
+        set_status(help_line());
       }
     }
   }
@@ -346,14 +346,14 @@ class Monitor : public guayaba::Script<guayaba::Node> {
 
   void update_summary() {
     if (summary_tasks_.get() != nullptr) {
-      summary_tasks_.get()->set_text(
+      summary_tasks_.get()->set_text(fit_width(
           "Tasks: " + std::to_string(system_.total) + " total, " +
           std::to_string(system_.running) + " running, " +
           std::to_string(system_.stopped) + " stopped, " +
-          std::to_string(system_.zombie) + " zombie");
+          std::to_string(system_.zombie) + " zombie"));
     }
     if (summary_mem_.get() != nullptr) {
-      summary_mem_.get()->set_text(
+      summary_mem_.get()->set_text(fit_width(
           "CPU: " + format_percent(system_cpu_percent_) + "% | Mem: " +
           format_bytes(system_.mem_total) + " total, " +
           format_bytes(system_.mem_used) + " used, " +
@@ -361,7 +361,7 @@ class Monitor : public guayaba::Script<guayaba::Node> {
           format_percent(system_.load_avg[0]) + " " +
           format_percent(system_.load_avg[1]) + " " +
           format_percent(system_.load_avg[2]) +
-          " | Interval: " + std::to_string(static_cast<int>(interval_)) + "s");
+          " | Interval: " + std::to_string(static_cast<int>(interval_)) + "s"));
     }
   }
 
@@ -552,7 +552,7 @@ class Monitor : public guayaba::Script<guayaba::Node> {
 
   void refresh_help() {
     if (status_.get() == nullptr || confirm_pid_ != 0) return;
-    status_.get()->set_text(help_line());
+    set_status(help_line());
     message_timer_ = 0.0;
   }
 
@@ -604,6 +604,37 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   static std::string truncate(const std::string& text, std::size_t max) {
     if (text.size() <= max) return text;
     return text.substr(0, max) + "\u2026";
+  }
+
+  // `text` clipped to at most `max_cells` codepoints, so a multi-byte glyph is
+  // never cut in half.
+  static std::string clip_cells(const std::string& text, int max_cells) {
+    if (max_cells <= 0) return {};
+    std::string out;
+    int cells = 0;
+    std::size_t index = 0;
+    while (index < text.size() && cells < max_cells) {
+      char32_t codepoint = 0;
+      const std::size_t length = guayaba::decode_utf8(text, index, codepoint);
+      out.append(text, index, length);
+      index += length;
+      ++cells;
+    }
+    return out;
+  }
+
+  // Keeps a free-form line from widening the layout. A fit_content label whose
+  // text is wider than the screen grows the whole layout VBox, which pushes the
+  // toolbar's right-aligned buttons past the right edge; the help/status line is
+  // the one that can get long (it carries the hotkeys and the active filter).
+  std::string fit_width(const std::string& text) const {
+    const int cols = table_controller_ ? table_controller_->screen_cols() : 0;
+    if (cols <= 4) return text;
+    return clip_cells(text, cols - 2);
+  }
+
+  void set_status(const std::string& text) {
+    if (status_.get() != nullptr) status_.get()->set_text(fit_width(text));
   }
 
   // The row under the cursor, or nullptr when there is none. Every action is
@@ -1035,7 +1066,7 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   }
 
   void set_message(const std::string& text) {
-    if (status_.get() != nullptr) status_.get()->set_text(text);
+    set_status(text);
     message_timer_ = 2.0;
   }
 
@@ -1106,8 +1137,8 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   // The search bar's resting hint, shown while the field is empty.
   static constexpr const char* kSearchHint = "name or user\u2026";
   std::string help_text_ =
-      "/ Search  s Sort  i Int  \u2191\u2193 Move  p Nice  t Thr  r Tree  g Hist  "
-      "k Kill  K Force  z Stop  c Cont  q Quit";
+      "[/] Search  [s] Sort  [i] Int  [\u2191\u2193] Move  [p] Nice  [t] Thr  [r] Tree  [g] Hist  "
+      "[k] Kill  [K] Force  [z] Stop  [c] Cont  [q] Quit";
 };
 
 }  // namespace tasks_lens

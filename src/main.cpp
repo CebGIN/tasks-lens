@@ -242,6 +242,18 @@ std::unique_ptr<Node> build_scene() {
   help->set_text_color(Color::CYAN);
   help->set_fit_content(true);
 
+  // 5. Input line at the very bottom: the name filter (f) and the priority
+  // editor (p). Idle it shows its placeholder; while editing it holds the focus
+  // and the typed text, so the hotkeys never see those keys.
+  NodeRef<LineEdit> prompt = layout->add_child<LineEdit>("prompt");
+  prompt->set_placeholder("[/] filter   [p] priority");
+  prompt->set_text_color(Color::BRIGHT_WHITE);
+  prompt->set_placeholder_color("BRIGHT_BLACK");
+  StyleBox prompt_box;
+  prompt_box.set_content_margin(1, 0, 0, 0);
+  prompt_box.set_background_color(Color::BLACK);
+  prompt->set_stylebox(prompt_box);
+
   // The table owns sorting and the row window.
   NodeRef<PanelContainer> table = parts.table;
   auto controller_ref =
@@ -252,8 +264,8 @@ std::unique_ptr<Node> build_scene() {
   std::unique_ptr<tasks_lens::ProcessSource> source =
       tasks_lens::create_system_process_source();
   auto monitor_ref = root->attach_script<tasks_lens::Monitor>(
-      std::move(source), summary_tasks, summary_mem, selection, help, table,
-      controller);
+      std::move(source), summary_tasks, summary_mem, selection, help, prompt,
+      table, controller);
   tasks_lens::Monitor* monitor = monitor_ref.script();
   if (monitor != nullptr) help->set_text(monitor->help_text());
 

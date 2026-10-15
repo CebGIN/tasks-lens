@@ -2,6 +2,7 @@
 #define TASKS_LENS_SCRIPTS_MONITOR_H
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -39,6 +40,7 @@ class Monitor : public guayaba::Script<guayaba::Node> {
           guayaba::NodeRef<guayaba::Label> summary_mem,
           guayaba::NodeRef<guayaba::Label> selection,
           guayaba::NodeRef<guayaba::Label> status,
+          guayaba::NodeRef<guayaba::LineEdit> prompt,
           guayaba::NodeRef<guayaba::PanelContainer> table,
           TableController* table_controller)
       : source_(std::move(source)),
@@ -46,8 +48,18 @@ class Monitor : public guayaba::Script<guayaba::Node> {
         summary_mem_(summary_mem),
         selection_(selection),
         status_(status),
+        prompt_(prompt),
         table_(table),
         table_controller_(table_controller) {}
+
+  // Wires the input field. Done here rather than in the scene builder because
+  // the Monitor is the one that knows what a submitted value means.
+  void on_attached() override {
+    if (prompt_.get() != nullptr) {
+      connect_script_signal("text_changed", prompt_.get(), this, &Monitor::on_prompt_changed);
+      connect_script_signal("text_submitted", prompt_.get(), this, &Monitor::on_prompt_submitted);
+    }
+  }
 
   void on_process(double delta_time) override {
     elapsed_ += delta_time;
@@ -56,10 +68,27 @@ class Monitor : public guayaba::Script<guayaba::Node> {
       elapsed_ = 0.0;
       first_frame_ = false;
       refresh();
+      dirty_ = true;
     }
 
-    sort_processes();
-    if (table_controller_ != nullptr) table_controller_->render(processes_);
+    // The visible list is rebuilt only when something that changes it did: a new
+    // snapshot, a filter edit, or a sort change. Rendering it every frame would
+    // otherwise copy and re-sort the whole table 30 times a second.
+    if (table_controller_ != nullptr &&
+        (table_controller_->sort_key() != last_sort_key_ ||
+         table_controller_->ascending() != last_ascending_)) {
+      dirty_ = true;
+    }
+    if (dirty_) {
+      rebuild_visible();
+      if (table_controller_ != nullptr) {
+        last_sort_key_ = table_controller_->sort_key();
+        last_ascending_ = table_controller_->ascending();
+      }
+      dirty_ = false;
+    }
+
+    if (table_controller_ != nullptr) table_controller_->render(visible_);
     update_selection();
 
     // A pending confirmation owns the status line until it is answered, so the
@@ -67,7 +96,7 @@ class Monitor : public guayaba::Script<guayaba::Node> {
     if (confirm_pid_ == 0 && message_timer_ > 0.0) {
       message_timer_ -= delta_time;
       if (message_timer_ <= 0.0 && status_.get() != nullptr) {
-        status_.get()->set_text(help_text_);
+        status_.get()->set_text(help_line());
       }
     }
   }
@@ -90,7 +119,7 @@ class Monitor : public guayaba::Script<guayaba::Node> {
       if (event.mouse_button == guayaba::MouseButton::LEFT && event.pressed &&
           table_.get() != nullptr && table_.get()->is_inside(event.mouse_pos) &&
           table_controller_ != nullptr) {
-        return table_controller_->select_at(event.mouse_pos, processes_);
+        return table_controller_->select_at(event.mouse_pos, visible_);
       }
       return false;
     }
@@ -112,6 +141,16 @@ class Monitor : public guayaba::Script<guayaba::Node> {
         return true;
       }
       return true;
+    }
+
+    // While the input field holds the focus it consumes typing and Enter, so the
+    // only key that reaches this root script is Escape, the cancel gesture.
+    if (mode_ != InputMode::None) {
+      if (event.key == guayaba::Key::ESCAPE) {
+        cancel_input_mode();
+        return true;
+      }
+      return false;
     }
 
     switch (event.key) {
@@ -140,6 +179,12 @@ class Monitor : public guayaba::Script<guayaba::Node> {
       case guayaba::Key::C:
         set_suspended(false);
         return true;
+      case guayaba::Key::F:
+        enter_filter();
+        return true;
+      case guayaba::Key::P:
+        enter_priority();
+        return true;
       case guayaba::Key::UP:
         select(-1);
         return true;
@@ -153,11 +198,11 @@ class Monitor : public guayaba::Script<guayaba::Node> {
         select(page_step());
         return true;
       case guayaba::Key::HOME:
-        if (table_controller_ != nullptr) table_controller_->select_to(0, processes_);
+        if (table_controller_ != nullptr) table_controller_->select_to(0, visible_);
         return true;
       case guayaba::Key::END:
         if (table_controller_ != nullptr) {
-          table_controller_->select_to(static_cast<int>(processes_.size()), processes_);
+          table_controller_->select_to(static_cast<int>(visible_.size()), visible_);
         }
         return true;
       default:
@@ -214,11 +259,20 @@ class Monitor : public guayaba::Script<guayaba::Node> {
     }
   }
 
-  void sort_processes() {
+  // Rebuilds the list the table shows: the snapshot with the name filter applied,
+  // sorted by the active column. The snapshot itself is left intact, so an action
+  // can still reach a process the filter is currently hiding.
+  void rebuild_visible() {
+    visible_.clear();
+    visible_.reserve(processes_.size());
+    for (const ProcessInfo& proc : processes_) {
+      if (matches_filter(proc)) visible_.push_back(proc);
+    }
+
     if (table_controller_ == nullptr) return;
     const std::string key = table_controller_->sort_key();
     const bool ascending = table_controller_->ascending();
-    std::sort(processes_.begin(), processes_.end(),
+    std::sort(visible_.begin(), visible_.end(),
               [&key, ascending](const ProcessInfo& a, const ProcessInfo& b) {
                 // Primary key: the active column, in the active direction.
                 const bool a_first =
@@ -232,6 +286,130 @@ class Monitor : public guayaba::Script<guayaba::Node> {
                 // instead of reshuffling with whatever order readdir returned.
                 return a.pid < b.pid;
               });
+  }
+
+  // Case-insensitive substring test, so a filter typed in any case matches.
+  static bool contains_ci(const std::string& haystack, const std::string& needle) {
+    return std::search(haystack.begin(), haystack.end(), needle.begin(), needle.end(),
+                       [](char a, char b) {
+                         return std::tolower(static_cast<unsigned char>(a)) ==
+                                std::tolower(static_cast<unsigned char>(b));
+                       }) != haystack.end();
+  }
+
+  // Spec item 13: filter by name. The command and the user are both searched, so
+  // "root" and "firefox" both work.
+  bool matches_filter(const ProcessInfo& proc) const {
+    if (filter_.empty()) return true;
+    return contains_ci(proc.command, filter_) || contains_ci(proc.user, filter_);
+  }
+
+  // --- Input line (filter / priority) ---------------------------------------
+
+  void enter_filter() {
+    mode_ = InputMode::Filter;
+    if (prompt_.get() != nullptr) {
+      prompt_.get()->set_placeholder("");
+      prompt_.get()->set_text(filter_);
+      prompt_.get()->grab_focus();
+    }
+    refresh_help();
+  }
+
+  void enter_priority() {
+    const ProcessInfo* proc = selected_process();
+    if (proc == nullptr) {
+      set_message("No process selected");
+      return;
+    }
+    mode_ = InputMode::Priority;
+    if (prompt_.get() != nullptr) {
+      // Left empty rather than prefilled with the current nice: a prefilled value
+      // would be edited at the caret, so typing "5" onto "0" would read 50. The
+      // current value goes in the prompt instead, and Enter applies what is typed.
+      prompt_.get()->set_placeholder("");
+      prompt_.get()->set_text("");
+      prompt_.get()->grab_focus();
+    }
+    set_message("nice for PID " + std::to_string(proc->pid) + " (now " +
+                std::to_string(proc->priority) + ", -20..19), Enter to apply");
+  }
+
+  void cancel_input_mode() {
+    if (mode_ == InputMode::Filter) {
+      filter_.clear();
+      dirty_ = true;
+    }
+    leave_input_mode();
+  }
+
+  void leave_input_mode() {
+    mode_ = InputMode::None;
+    if (prompt_.get() != nullptr) {
+      prompt_.get()->release_focus();
+      prompt_.get()->set_text("");
+      prompt_.get()->set_placeholder("[/] filter   [p] priority");
+    }
+    refresh_help();
+  }
+
+  void on_prompt_changed(const std::string& text) {
+    if (mode_ == InputMode::Filter) {
+      filter_ = text;
+      dirty_ = true;  // live filtering as the user types
+      refresh_help();
+    }
+  }
+
+  void on_prompt_submitted(const std::string& text) {
+    if (mode_ == InputMode::Priority) {
+      const std::string result = apply_priority(text);
+      leave_input_mode();
+      if (!result.empty()) set_message(result);
+    } else {
+      filter_ = text;
+      dirty_ = true;
+      leave_input_mode();
+    }
+  }
+
+  // Spec item 10: change the priority of the cursor's process. The field is
+  // prefilled with the current nice, so Enter alone is a no-op and an edit is
+  // whatever the user types.
+  std::string apply_priority(const std::string& text) {
+    const ProcessInfo* proc = selected_process();
+    if (proc == nullptr) return "No process selected";
+
+    int value = 0;
+    try {
+      std::size_t used = 0;
+      value = std::stoi(text, &used);
+      if (used != text.size()) return "Invalid priority: " + text;
+    } catch (const std::exception&) {
+      return "Invalid priority: " + text;
+    }
+    value = std::max(-20, std::min(19, value));  // the nice range
+
+    const int pid = proc->pid;
+    if (source_->set_priority(pid, value)) {
+      elapsed_ = interval_;  // re-read now so PRI shows the change
+      return "nice " + std::to_string(value) + " -> PID " + std::to_string(pid);
+    }
+    return report_failure(pid);
+  }
+
+  // The line the status bar falls back to when no message is showing: the live
+  // filter, if any, then the hotkeys. The filter goes first so a long hotkey
+  // list can never clip it off the right edge.
+  std::string help_line() const {
+    if (filter_.empty()) return help_text_;
+    return "filter:" + filter_ + "  \u2502  " + help_text_;
+  }
+
+  void refresh_help() {
+    if (status_.get() == nullptr || confirm_pid_ != 0) return;
+    status_.get()->set_text(help_line());
+    message_timer_ = 0.0;
   }
 
   std::string sort_description() const {
@@ -251,7 +429,7 @@ class Monitor : public guayaba::Script<guayaba::Node> {
 
   void select(int rows) {
     if (table_controller_ != nullptr) {
-      table_controller_->select_by(rows, processes_);
+      table_controller_->select_by(rows, visible_);
     }
   }
 
@@ -262,8 +440,8 @@ class Monitor : public guayaba::Script<guayaba::Node> {
     std::string text = "Selected: -";
     if (table_controller_ != nullptr) {
       const int index = table_controller_->selected_index();
-      if (index >= 0 && index < static_cast<int>(processes_.size())) {
-        const ProcessInfo& proc = processes_[static_cast<std::size_t>(index)];
+      if (index >= 0 && index < static_cast<int>(visible_.size())) {
+        const ProcessInfo& proc = visible_[static_cast<std::size_t>(index)];
         text = "Selected PID " + std::to_string(proc.pid) + "  " + proc.command;
       }
     }
@@ -278,8 +456,8 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   const ProcessInfo* selected_process() const {
     if (table_controller_ == nullptr) return nullptr;
     const int index = table_controller_->selected_index();
-    if (index < 0 || index >= static_cast<int>(processes_.size())) return nullptr;
-    return &processes_[static_cast<std::size_t>(index)];
+    if (index < 0 || index >= static_cast<int>(visible_.size())) return nullptr;
+    return &visible_[static_cast<std::size_t>(index)];
   }
 
   void terminate_selected(bool force) {
@@ -350,16 +528,30 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   std::unique_ptr<ProcessSource> source_;
   CpuSampler sampler_;
 
+  // What the bottom input line is currently for. None means the field is idle
+  // and the hotkeys are live; the other two focus it and gate the hotkeys.
+  enum class InputMode { None, Filter, Priority };
+
   guayaba::NodeRef<guayaba::Label> summary_tasks_;
   guayaba::NodeRef<guayaba::Label> summary_mem_;
   guayaba::NodeRef<guayaba::Label> selection_;
   std::string selection_text_;
   guayaba::NodeRef<guayaba::Label> status_;
+  guayaba::NodeRef<guayaba::LineEdit> prompt_;
   guayaba::NodeRef<guayaba::PanelContainer> table_;
   TableController* table_controller_ = nullptr;
 
+  InputMode mode_ = InputMode::None;
+  std::string filter_;
+
   SystemInfo system_;
+  // The full snapshot, filtered and sorted into `visible_` only when something
+  // that changes the view does - see on_process.
   std::vector<ProcessInfo> processes_;
+  std::vector<ProcessInfo> visible_;
+  bool dirty_ = true;
+  std::string last_sort_key_;
+  bool last_ascending_ = true;
 
   double interval_ = 1.0;
   int interval_index_ = 0;
@@ -375,8 +567,8 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   // PID awaiting a y/n answer for a forced termination; 0 when no prompt is up.
   int confirm_pid_ = 0;
   std::string help_text_ =
-      "[q] Quit  [s] Sort  [i] Interval  [\u2191/\u2193] Select  [k] Terminate  "
-      "[K] Force  [z] Suspend  [c] Resume";
+      "q Quit  s Sort  i Interval  f Filter  p Nice  k Term  K Force  z Stop  "
+      "c Cont  \u2191\u2193 Move";
 };
 
 }  // namespace tasks_lens

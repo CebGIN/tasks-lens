@@ -8,18 +8,9 @@
 
 namespace tasks_lens {
 
-/*
-    The platform seam. One implementation per operating system, chosen by
-    create_system_process_source(), exactly the way GuayabaTUIEngine picks a
-    terminal backend. Everything above this line is OS-agnostic.
-
-    Read methods return a fresh snapshot; cpu_percent/mem_percent are left at 0
-    on purpose and filled by CpuSampler, which owns the previous-refresh state.
-
-    Action methods return false on failure (process gone, no permission) rather
-    than throwing, because a vanished process is the normal case for a monitor
-    and spec item 15 asks for a message, not a crash.
-*/
+// Platform seam: one implementation per OS, picked by
+// create_system_process_source(). Read methods return a fresh snapshot with
+// cpu_percent/mem_percent left at 0; action methods return false on failure.
 class ProcessSource {
  public:
   virtual ~ProcessSource() = default;

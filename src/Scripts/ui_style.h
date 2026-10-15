@@ -7,10 +7,8 @@
 
 namespace tasks_lens {
 
-// One look for every action button in the app: a blue band at rest, bright blue
-// under the pointer, inverted while held, and a flat black "off" state for an
-// action that has no target (no selected row). Kept in one place so the toolbar,
-// the overlay Close and the confirmation Yes/No cannot drift apart.
+// Applies the shared toolbar look to `btn`: blue at rest, bright blue on hover,
+// inverted while pressed, black when disabled. No-op when `btn` is null.
 inline void apply_tool_button_style(guayaba::Button* btn) {
   if (btn == nullptr) return;
 
@@ -36,13 +34,12 @@ inline void apply_tool_button_style(guayaba::Button* btn) {
   disabled.set_content_margin(1, 0, 1, 0);
   disabled.set_background_color(guayaba::Color::BLACK);
   btn->set_stylebox(guayaba::ButtonState::Disabled, disabled);
-  // Disabled is the only state whose text colour the default does not already
-  // set, so it goes through the name overload (there is no BRIGHT_BLACK constant).
+  // Disabled has no BRIGHT_BLACK constant, so the colour is set by name.
   btn->set_text_color(guayaba::ButtonState::Disabled, "BRIGHT_BLACK");
 }
 
-// Creates a button in `parent` with the toolbar look, and hands back the
-// reference so the caller can wire "clicked" or toggle it disabled.
+// Adds a button named `name` with text `label` to `parent`, applies the toolbar
+// look, and returns it.
 inline guayaba::NodeRef<guayaba::Button> add_tool_button(
     const guayaba::NodeRef<guayaba::Container>& parent, const std::string& name,
     const std::string& label) {

@@ -5,10 +5,8 @@
 
 namespace tasks_lens {
 
-// Reads process data through Tool Help and PSAPI - the interfaces the spec names
-// for Windows. Written but not yet compiled anywhere: it only builds on a
-// Windows toolchain. Actions are intentionally stubbed until a Windows box can
-// verify them.
+// Reads process data through Tool Help and PSAPI. Only builds on a Windows
+// toolchain; the action methods are stubbed until a Windows box can verify them.
 class WindowsProcessSource : public ProcessSource {
  public:
   const char* platform_name() const override { return "windows"; }

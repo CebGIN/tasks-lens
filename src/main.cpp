@@ -1,30 +1,22 @@
-#include <algorithm>
-#include <chrono>
-#include <cstdio>
 #include <memory>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
 #include <guayaba/Guayaba.hpp>
 
-#include "Data/cpu_sampler.h"
 #include "Data/process_source.h"
-#include "Scripts/format.h"
 #include "Scripts/monitor.h"
 #include "Scripts/table_controller.h"
 #include "Scripts/ui_style.h"
+#include "dump.h"
 
 using namespace guayaba;
 
 namespace {
 
-// Column layout for the process table. Header button text is padded to `width`,
-// so a button's automatic minimum size is exactly the column width.
-// `width` is the fixed column width, except for the one column with `fills`:
-// that one starts at `width` (its minimum) and grows to use every column left
-// over, so long command lines are not clipped at a fixed 16.
+// Column layout for the process table. `width` is the fixed column width; the
+// one column with `fills` starts at `width` and grows to absorb the leftover.
 struct ColumnSpec {
   const char* key;
   const char* title;
@@ -42,55 +34,33 @@ constexpr ColumnSpec kColumns[] = {
 };
 constexpr int kColumnCount = sizeof(kColumns) / sizeof(kColumns[0]);
 
-// Column header: the title is also the sort trigger. Per-state backgrounds
-// make the header row read as a band. The Normal state (active or not) comes
-// from tasks_lens::apply_header_normal_style so the controller stays the single
-// source of truth for header appearance.
+// Column header: the title is also the sort trigger. Header styling comes from
+// apply_header_style.
 NodeRef<Button> create_header_button(const NodeRef<Container>& parent,
                                      const std::string& node_name,
                                      const std::string& label) {
   NodeRef<Button> btn = parent->add_child<Button>(node_name);
   btn->set_text(label);
-  // Column widths come from custom_minimum_size, so the title is not padded; it
-  // sits centred in whatever width the column is given.
+  // Column widths come from custom_minimum_size; the title sits centred in the
+  // width the column is given.
   btn->set_text_align(TextAlign::Center);
 
-  tasks_lens::apply_header_normal_style(btn.get(), false);
-
-  StyleBox hover;
-  hover.set_content_margin(0,1,0,1);
-  hover.set_background_color(Color::BRIGHT_BLUE);
-  btn->set_stylebox(ButtonState::Hover, hover);
-  btn->set_text_color(ButtonState::Hover, Color::BRIGHT_YELLOW);
-
-  StyleBox pressed;
-  pressed.set_content_margin(0,1,0,1);
-  pressed.set_background_color(Color::BRIGHT_WHITE);
-  btn->set_stylebox(ButtonState::Pressed, pressed);
-  btn->set_text_color(ButtonState::Pressed, Color::BLACK);
-
-  StyleBox disabled;
-  disabled.set_content_margin(0,1,0,1);
-  disabled.set_background_color(Color::BLACK);
-  btn->set_stylebox(ButtonState::Disabled, disabled);
-  btn->set_text_color(ButtonState::Disabled, Color::BLACK);
-
+  tasks_lens::apply_header_style(btn.get(), false);
   return btn;
 }
 
 // Process table: one bordered panel holding one VBox per column. Each column
-// stacks the header button (title + sort trigger) over a nested VBox that the
-// TableController fills with one row label per visible process.
+// stacks a header button over a nested VBox that the TableController fills with
+// one row label per visible process.
 struct TableParts {
   NodeRef<PanelContainer> table;
-  std::vector<tasks_lens::TableController::Column> columns;
+  std::vector<tasks_lens::TableController::ColumnSpec> columns;
 };
 
 TableParts build_table(const NodeRef<Container>& parent) {
   NodeRef<PanelContainer> table = parent->add_child<PanelContainer>("table");
-  // FullRect both stretches the panel across the layout row AND is what makes
-  // Grow::Both meaningful: without anchors spanning 0..1 the grown size resolves
-  // against a zero-size anchor rect and the table stays at its minimum.
+  // FullRect stretches the panel across the layout row; Grow::Both only resolves
+  // against anchors spanning 0..1.
   table->set_anchor_preset(AnchorPreset::FullRect);
   table->get_stylebox().set_background_color(Color::BLACK);
   table->get_stylebox().set_border_style(StyleBorder::DOUBLE);
@@ -103,19 +73,15 @@ TableParts build_table(const NodeRef<Container>& parent) {
   columns->set_content_alignment(ContentAlignment::Begin);
   columns->set_separation(1);
 
-  std::vector<tasks_lens::TableController::Column> specs;
+  std::vector<tasks_lens::TableController::ColumnSpec> specs;
 
   for (int c = 0; c < kColumnCount; ++c) {
     const ColumnSpec& col = kColumns[c];
 
     NodeRef<VBox> column_vbox =
         columns->add_child<VBox>(std::string("col_") + col.key);
-    // FullRect makes the column fill the table's height. Horizontally it must NOT
-    // grow (FullRect's grow_x is Both): the padding used to size a column is
-    // trailing spaces, and the engine's measure_text strips those, so a column's
-    // own minimum is only as wide as its longest text. custom_minimum_size fixes
-    // the width regardless of text; the one filling column keeps grow_x = Both so
-    // it, and only it, absorbs the leftover and reaches the right border.
+    // FullRect fills the table's height. custom_minimum_size fixes the width;
+    // grow_x is off except on the filling column, which absorbs the leftover.
     column_vbox->set_anchor_preset(AnchorPreset::FullRect);
     column_vbox->set_custom_minimum_size(Vec2{col.width, 0});
     if (!col.fills) column_vbox->set_grow_x(Grow::None);
@@ -124,11 +90,8 @@ TableParts build_table(const NodeRef<Container>& parent) {
 
     NodeRef<Button> btn = create_header_button(
         column_vbox, std::string("sort_") + col.key, col.title);
-    // Fill the column's width so the header band and the row cells reach its
-    // right edge. grow_x only stretches against the anchor span, and the default
-    // TopLeft anchors are a zero-width span, so the right anchor has to be pulled
-    // out to 1 as well. Height is left alone (top == bottom == 0), so neither
-    // becomes a vertical expander.
+    // Stretch to the column's right edge: set the right anchor to 1 so grow_x has
+    // a span to grow against. Height is left at 0 so it does not expand vertically.
     btn->set_anchor_right(1.0f);
     btn->set_grow_x(Grow::Both);
 
@@ -138,58 +101,22 @@ TableParts build_table(const NodeRef<Container>& parent) {
     rows->set_grow_x(Grow::Both);
     rows->set_content_alignment(ContentAlignment::Begin);
 
-    specs.push_back({col.key, col.width, col.fills, col.width, rows, btn});
+    tasks_lens::TableController::ColumnSpec spec;
+    spec.key = col.key;
+    spec.width = col.width;
+    spec.min_width = col.width;
+    spec.fills = col.fills;
+    spec.rows = rows;
+    spec.header = btn;
+    specs.push_back(std::move(spec));
   }
 
-  // The table is the one row allowed to grow: it absorbs the slack so the help
-  // line stays pinned at the bottom. Clipping keeps overflowing rows from
-  // painting over that line.
+  // The table is the one row that grows; it absorbs the slack so the help line
+  // stays at the bottom. Clipping keeps overflowing rows from painting over it.
   table->set_grow_y(Grow::Both);
   table->set_clip_children(true);
 
   return {table, std::move(specs)};
-}
-
-// Headless verification path for the data layer: takes two snapshots a second
-// apart so the CPU deltas are non-zero, then prints a top-like excerpt to
-// stdout. No terminal takeover, so it can run in a pipe.
-int run_dump() {
-  std::unique_ptr<tasks_lens::ProcessSource> source =
-      tasks_lens::create_system_process_source();
-  tasks_lens::CpuSampler sampler;
-
-  for (int pass = 0; pass < 2; ++pass) {
-    tasks_lens::SystemInfo sys = source->read_system();
-    std::vector<tasks_lens::ProcessInfo> procs = source->read_processes();
-    sampler.apply(sys, procs);
-
-    std::printf("=== %s pass %d ===\n", source->platform_name(), pass + 1);
-    std::printf(
-        "tasks %d total, %d running, %d stopped, %d zombie | load %.2f %.2f %.2f\n",
-        sys.total, sys.running, sys.stopped, sys.zombie, sys.load_avg[0],
-        sys.load_avg[1], sys.load_avg[2]);
-    std::printf("mem %.1f MiB total, %.1f MiB used, %.1f MiB avail | cpu %.1fs\n",
-                sys.mem_total / 1048576.0, sys.mem_used / 1048576.0,
-                sys.mem_available / 1048576.0, sys.total_cpu_time_ns / 1e9);
-
-    std::sort(procs.begin(), procs.end(),
-              [](const tasks_lens::ProcessInfo& a,
-                 const tasks_lens::ProcessInfo& b) {
-                return a.cpu_percent > b.cpu_percent;
-              });
-
-    const std::size_t shown = procs.size() < 10 ? procs.size() : 10;
-    for (std::size_t i = 0; i < shown; ++i) {
-      const tasks_lens::ProcessInfo& p = procs[i];
-      std::printf("%7d %7d %-8s %s %5.1f %5.1f %8.1fM t%-3d n%-3d %8.2fs  %s\n",
-                  p.pid, p.ppid, p.user.c_str(),
-                  tasks_lens::process_state_code(p.state), p.cpu_percent,
-                  p.mem_percent, p.rss_bytes / 1048576.0, p.thread_count,
-                  p.priority, p.cpu_time_ns / 1e9, p.command.c_str());
-    }
-    if (pass == 0) std::this_thread::sleep_for(std::chrono::seconds(1));
-  }
-  return 0;
 }
 
 // Full-screen scene: summary up top, the live process table in the middle, a
@@ -213,14 +140,11 @@ std::unique_ptr<Node> build_scene() {
   layout->set_content_alignment(ContentAlignment::Begin);
 
   // 1. Title row: the title on the left, the global actions on the right. The
-  //    title grows into the free space so the buttons land against the right
-  //    edge (the same anchor + grow trick the table headers use inside a column).
+  //    title grows so the buttons land at the right edge.
   NodeRef<HBox> title_row = layout->add_child<HBox>("title_row");
   title_row->set_content_alignment(ContentAlignment::Begin);
   title_row->set_separation(1);
-  // Fill the row's width (the cross axis of the layout VBox) so its children have
-  // leftover space to grow into; without this the row is only as wide as its
-  // children and nothing can be pushed to the right edge.
+  // Fill the row's width so its children have leftover space to grow into.
   title_row->set_anchor_right(1.0f);
   title_row->set_grow_x(Grow::Both);
 
@@ -236,8 +160,7 @@ std::unique_ptr<Node> build_scene() {
       tasks_lens::add_tool_button(title_row, "btn_interval", "Interval");
   NodeRef<Button> btn_quit = tasks_lens::add_tool_button(title_row, "btn_quit", "Quit");
 
-  // 2. Search bar: the name/user filter, always visible at the top. The LineEdit
-  //    takes the focus itself on click, so this is the mouse path into filtering.
+  // 2. Search bar: the name/user filter, always visible at the top.
   NodeRef<HBox> search_row = layout->add_child<HBox>("search_row");
   search_row->set_content_alignment(ContentAlignment::Begin);
   search_row->set_separation(1);

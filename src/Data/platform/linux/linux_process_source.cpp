@@ -22,8 +22,8 @@ namespace tasks_lens {
 
 namespace {
 
-// How many kernel jiffies make a second, and how big a memory page is. Both are
-// queried once: they cannot change while the process runs.
+// Kernel jiffies per second and memory page size, both queried once: they cannot
+// change while the process runs.
 std::uint64_t clock_ticks_per_sec() {
   static const long hz = sysconf(_SC_CLK_TCK);
   return hz > 0 ? static_cast<std::uint64_t>(hz) : 100u;
@@ -80,9 +80,8 @@ struct StatFields {
   long rss = 0;          // 24
 };
 
-// comm (field 2) is the only field that may contain spaces and parentheses, so
-// fields are read from after the LAST ')' and indexed relative to field 3. That
-// is why this cannot be a naive whitespace split of the whole line.
+// comm (field 2) may contain spaces and parentheses, so fields are read from
+// after the LAST ')' and indexed relative to field 3.
 bool parse_stat(const std::string& data, StatFields& f) {
   const std::size_t lparen = data.find('(');
   const std::size_t rparen = data.rfind(')');
@@ -124,11 +123,10 @@ bool read_uid(const std::string& status, uid_t& uid) {
   return true;
 }
 
-// Passwd lookups are slow and an idle machine has many root processes, so names
-// are cached per uid for the lifetime of the process.
-std::string username(uid_t uid) {
-  static std::unordered_map<uid_t, std::string> cache;
-  auto it = cache.find(uid);
+// `uid` resolved to a user name, memoized in `cache`.
+std::string username(uid_t uid, std::unordered_map<std::uint64_t, std::string>& cache) {
+  const std::uint64_t key = static_cast<std::uint64_t>(uid);
+  auto it = cache.find(key);
   if (it != cache.end()) return it->second;
 
   std::string name = std::to_string(static_cast<unsigned long>(uid));
@@ -139,12 +137,11 @@ std::string username(uid_t uid) {
       result->pw_name != nullptr) {
     name = result->pw_name;
   }
-  cache.emplace(uid, name);
+  cache.emplace(key, name);
   return name;
 }
 
-// cmdline is a NUL-separated argument vector; the table wants one readable
-// string, so the separators become spaces.
+// cmdline is a NUL-separated argument vector; separators become spaces.
 std::string normalize_cmdline(std::string cmdline) {
   for (char& c : cmdline) {
     if (c == '\0') c = ' ';
@@ -153,93 +150,102 @@ std::string normalize_cmdline(std::string cmdline) {
   return cmdline;
 }
 
+// Fills total/idle CPU time from /proc/stat's aggregate "cpu" line.
+void read_cpu_times(SystemInfo& info) {
+  std::string stat;
+  if (!read_file("/proc/stat", stat)) return;
+  std::istringstream ss(stat);
+  std::string first;
+  ss >> first;
+  if (first != "cpu") return;
+  // Fields: user nice system idle iowait irq softirq steal. guest/guest_nice
+  // are already inside user/nice, and idle+iowait are indices 3 and 4.
+  std::uint64_t ticks = 0;
+  std::uint64_t idle_ticks = 0;
+  std::uint64_t value = 0;
+  for (int i = 0; i < 8 && (ss >> value); ++i) {
+    ticks += value;
+    if (i == 3 || i == 4) idle_ticks += value;
+  }
+  info.total_cpu_time_ns = ticks_to_ns(ticks);
+  info.idle_cpu_time_ns = ticks_to_ns(idle_ticks);
+}
+
+// Counts all processes plus the running/stopped/zombie ones from /proc/<pid>/stat.
+void read_task_counts(SystemInfo& info) {
+  DIR* dir = opendir("/proc");
+  if (dir == nullptr) return;
+  struct dirent* entry;
+  while ((entry = readdir(dir)) != nullptr) {
+    if (!is_numeric_pid(entry->d_name)) continue;
+    std::string stat_data;
+    if (!read_file(std::string("/proc/") + entry->d_name + "/stat", stat_data)) {
+      continue;  // Exited between readdir and read: skip, not an error.
+    }
+    StatFields fields;
+    if (!parse_stat(stat_data, fields)) continue;
+    info.total++;
+    switch (map_state(fields.state)) {
+      case ProcessState::Running: info.running++; break;
+      case ProcessState::Stopped: info.stopped++; break;
+      case ProcessState::Zombie: info.zombie++; break;
+      default: break;
+    }
+  }
+  closedir(dir);
+}
+
+void read_load_avg(SystemInfo& info) {
+  std::string load;
+  if (!read_file("/proc/loadavg", load)) return;
+  std::istringstream ss(load);
+  ss >> info.load_avg[0] >> info.load_avg[1] >> info.load_avg[2];
+}
+
+void read_memory(SystemInfo& info) {
+  std::string meminfo;
+  if (!read_file("/proc/meminfo", meminfo)) return;
+  std::istringstream ss(meminfo);
+  std::string line;
+  std::uint64_t mem_free = 0;
+  std::uint64_t buffers = 0;
+  std::uint64_t cached = 0;
+  while (std::getline(ss, line)) {
+    std::istringstream ls(line);
+    std::string key;
+    std::uint64_t value = 0;
+    std::string unit;
+    ls >> key >> value >> unit;
+    if (key == "MemTotal:") {
+      info.mem_total = value * 1024;
+    } else if (key == "MemFree:") {
+      mem_free = value * 1024;
+    } else if (key == "MemAvailable:") {
+      info.mem_available = value * 1024;
+    } else if (key == "Buffers:") {
+      buffers = value * 1024;
+    } else if (key == "Cached:") {
+      cached = value * 1024;
+    }
+  }
+  if (info.mem_available == 0) info.mem_available = mem_free + buffers + cached;
+  if (info.mem_total > info.mem_available) {
+    info.mem_used = info.mem_total - info.mem_available;
+  }
+}
+
 }  // namespace
 
 SystemInfo LinuxProcessSource::read_system() {
   SystemInfo info;
 
-  std::string stat;
-  if (read_file("/proc/stat", stat)) {
-    std::istringstream ss(stat);
-    std::string first;
-    ss >> first;
-    if (first == "cpu") {
-      // user nice system idle iowait irq softirq steal. guest/guest_nice are
-      // already counted inside user/nice, so adding them would double-count.
-      // Idle and iowait (indices 3 and 4) are also tracked on their own for the
-      // summary's overall CPU percentage.
-      std::uint64_t ticks = 0;
-      std::uint64_t idle_ticks = 0;
-      std::uint64_t value = 0;
-      for (int i = 0; i < 8 && (ss >> value); ++i) {
-        ticks += value;
-        if (i == 3 || i == 4) idle_ticks += value;
-      }
-      info.total_cpu_time_ns = ticks_to_ns(ticks);
-      info.idle_cpu_time_ns = ticks_to_ns(idle_ticks);
-    }
-  }
+  read_cpu_times(info);
 
-  DIR* dir = opendir("/proc");
-  if (dir != nullptr) {
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != nullptr) {
-      if (!is_numeric_pid(entry->d_name)) continue;
+  read_task_counts(info);
 
-      std::string stat_data;
-      if (!read_file(std::string("/proc/") + entry->d_name + "/stat", stat_data)) {
-        continue;  // Exited between readdir and read: skip, not an error.
-      }
-      StatFields fields;
-      if (!parse_stat(stat_data, fields)) continue;
+  read_load_avg(info);
 
-      info.total++;
-      switch (map_state(fields.state)) {
-        case ProcessState::Running: info.running++; break;
-        case ProcessState::Stopped: info.stopped++; break;
-        case ProcessState::Zombie: info.zombie++; break;
-        default: break;
-      }
-    }
-    closedir(dir);
-  }
-
-  std::string load;
-  if (read_file("/proc/loadavg", load)) {
-    std::istringstream ss(load);
-    ss >> info.load_avg[0] >> info.load_avg[1] >> info.load_avg[2];
-  }
-
-  std::string meminfo;
-  if (read_file("/proc/meminfo", meminfo)) {
-    std::istringstream ss(meminfo);
-    std::string line;
-    std::uint64_t mem_free = 0;
-    std::uint64_t buffers = 0;
-    std::uint64_t cached = 0;
-    while (std::getline(ss, line)) {
-      std::istringstream ls(line);
-      std::string key;
-      std::uint64_t value = 0;
-      std::string unit;
-      ls >> key >> value >> unit;
-      if (key == "MemTotal:") {
-        info.mem_total = value * 1024;
-      } else if (key == "MemFree:") {
-        mem_free = value * 1024;
-      } else if (key == "MemAvailable:") {
-        info.mem_available = value * 1024;
-      } else if (key == "Buffers:") {
-        buffers = value * 1024;
-      } else if (key == "Cached:") {
-        cached = value * 1024;
-      }
-    }
-    if (info.mem_available == 0) info.mem_available = mem_free + buffers + cached;
-    if (info.mem_total > info.mem_available) {
-      info.mem_used = info.mem_total - info.mem_available;
-    }
-  }
+  read_memory(info);
 
   return info;
 }
@@ -277,7 +283,7 @@ std::vector<ProcessInfo> LinuxProcessSource::read_processes() {
     std::string status;
     if (read_file(base + "/status", status)) {
       uid_t uid = 0;
-      if (read_uid(status, uid)) proc.user = username(uid);
+      if (read_uid(status, uid)) proc.user = username(uid, user_cache_);
     }
 
     std::string cmdline;

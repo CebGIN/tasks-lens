@@ -5,13 +5,22 @@ namespace tasks_lens {
 void CpuSampler::apply(SystemInfo& system, std::vector<ProcessInfo>& processes) {
   const std::uint64_t total_ns = system.total_cpu_time_ns;
 
-  // A total that did not advance (or went backwards, e.g. a counter reset) has
-  // no meaningful denominator, so leave every cpu_percent at 0 rather than
-  // dividing by it.
+  // A total that did not advance (or went backwards) has no useful denominator:
+  // per-process percentages stay 0 and the system percentage keeps its old value.
   std::uint64_t total_delta = 0;
   const bool have_total_delta =
       has_previous_total_ && total_ns > previous_total_cpu_ns_;
-  if (have_total_delta) total_delta = total_ns - previous_total_cpu_ns_;
+  if (have_total_delta) {
+    total_delta = total_ns - previous_total_cpu_ns_;
+    const std::uint64_t idle_ns = system.idle_cpu_time_ns;
+    const std::uint64_t idle_delta =
+        idle_ns > previous_idle_cpu_ns_ ? idle_ns - previous_idle_cpu_ns_ : 0;
+    if (total_delta > 0) {
+      system_cpu_percent_ =
+          static_cast<double>(total_delta - idle_delta) * 100.0 /
+          static_cast<double>(total_delta);
+    }
+  }
 
   std::unordered_map<int, std::uint64_t> next_cpu_ns;
   next_cpu_ns.reserve(processes.size());
@@ -37,6 +46,7 @@ void CpuSampler::apply(SystemInfo& system, std::vector<ProcessInfo>& processes) 
 
   previous_cpu_ns_ = std::move(next_cpu_ns);
   previous_total_cpu_ns_ = total_ns;
+  previous_idle_cpu_ns_ = system.idle_cpu_time_ns;
   has_previous_total_ = true;
 }
 

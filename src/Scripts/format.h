@@ -6,16 +6,9 @@
 #include <string>
 
 #include "Data/process_info.h"
+#include "Scripts/text_util.h"
 
 namespace tasks_lens {
-
-// Left-aligned, truncated to width: every cell of a column is the same size, so
-// the columns stay aligned. Same helper the scene builder used.
-inline std::string pad(const std::string& text, int width) {
-  if (width <= 0) return {};
-  if (static_cast<int>(text.size()) >= width) return text.substr(0, width);
-  return text + std::string(width - text.size(), ' ');
-}
 
 // 12.4M-style resident memory: one decimal and a unit, base 1024.
 inline std::string format_bytes(std::uint64_t bytes) {

@@ -8,33 +8,24 @@
 
 #include <guayaba/Core/Utf8.hpp>
 
+#include "Scripts/text_util.h"
+
 namespace tasks_lens {
 
 /*
-    A one-line marquee for a cell that can be wider than its column.
-
-    When the text fits the window it is shown whole (padded to the window width).
-    When it does not, the marquee steps a `width`-cell window across the text one
-    cell at a time, wrapping around through a short gap so the join is visible and
-    the whole command can be read.
-
-    It is just the offset and the clock - the owner decides which cell it applies
-    to and writes visible() into that label. That keeps the timing out of the
-    table's per-cell loop, and makes the scroll a property of the selection rather
-    than of any one label.
-
-    Everything is measured in codepoints, matching the engine's grid, so a
-    multi-byte glyph is one cell and is never split by the window.
+    A one-line marquee for a cell that can be wider than its column. When the
+    text fits the window it is shown whole padded to the window width; when it
+    does not, a `width`-cell window steps across the text one cell at a time,
+    wrapping through a short gap. Everything is measured in codepoints, so a
+    multi-byte glyph is one cell and is never split.
 */
 class Marquee {
  public:
-  // Seconds per cell. Slow enough to read, fast enough that even a long command
-  // cycles in a few seconds.
+  // Seconds per cell.
   static constexpr double kStepSeconds = 0.2;
 
   // Points the marquee at `text` shown in a `width`-cell window. A change of text
-  // or width restarts at the first cell, so a new selection is read from its
-  // start rather than from wherever the previous one had scrolled to.
+  // or width restarts at the first cell.
   void set(const std::string& text, int width) {
     if (text == text_ && width == width_) return;
     text_ = text;
@@ -46,8 +37,8 @@ class Marquee {
     scrolling_ = false;
     if (width_ <= 0) return;
 
-    // The loop the window walks: the text plus a gap, so the wrap-around does not
-    // glue the end of the command to its start.
+    // The loop the window walks: the text plus a gap so the wrap-around is
+    // visible.
     looped_ = text_ + "   ";
     cells_ = split_codepoints(looped_);
     scrolling_ = guayaba::text_width(text_) > width_;
@@ -63,8 +54,7 @@ class Marquee {
     offset_ = (offset_ + steps) % static_cast<int>(cells_.size());
   }
 
-  // The cells to show now: exactly `width` of them, so the label's minimum stays
-  // the column width and the row does not reflow as it scrolls.
+  // The cells to show now: exactly `width` of them.
   std::string visible() const {
     if (width_ <= 0) return {};
     if (!scrolling_) return pad_cells(text_, width_);
@@ -81,7 +71,7 @@ class Marquee {
 
  private:
   // Byte offset and length of each codepoint, so the window can slice whole
-  // glyphs. Built once per set().
+  // glyphs.
   static std::vector<std::pair<std::size_t, std::size_t>> split_codepoints(
       const std::string& text) {
     std::vector<std::pair<std::size_t, std::size_t>> cells;
@@ -93,22 +83,6 @@ class Marquee {
       index += length;
     }
     return cells;
-  }
-
-  // `text` clipped (or padded) to exactly `width` codepoints.
-  static std::string pad_cells(const std::string& text, int width) {
-    std::string out;
-    int cells = 0;
-    std::size_t index = 0;
-    while (index < text.size() && cells < width) {
-      char32_t codepoint = 0;
-      const std::size_t length = guayaba::decode_utf8(text, index, codepoint);
-      out.append(text, index, length);
-      index += length;
-      ++cells;
-    }
-    if (cells < width) out.append(static_cast<std::size_t>(width - cells), ' ');
-    return out;
   }
 
   std::string text_;

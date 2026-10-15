@@ -6,16 +6,9 @@
 
 namespace tasks_lens {
 
-/*
-    Platform-neutral snapshot types.
-
-    Every backend fills these, so nothing above the ProcessSource interface ever
-    sees a /proc line or a Win32 structure. The one thing that could have leaked
-    through - how each OS counts CPU time - is normalized away here: cpu_time_ns
-    is always nanoseconds of accumulated CPU time, and SystemInfo's
-    total_cpu_time_ns is the same unit for the whole machine. That is what lets
-    one CpuSampler do the delta math for every platform.
-*/
+// Platform-neutral snapshot types filled by every backend. cpu_time_ns is
+// always nanoseconds of accumulated CPU time, the same unit as
+// SystemInfo::total_cpu_time_ns.
 
 enum class ProcessState {
   Running,
@@ -27,7 +20,7 @@ enum class ProcessState {
   Unknown,
 };
 
-// Canonical one-letter code, matching the convention ps/top use (R S D T Z I).
+// Returns the one-letter state code used by ps/top; Unknown returns "?".
 inline const char* process_state_code(ProcessState state) {
   switch (state) {
     case ProcessState::Running: return "R";
@@ -47,16 +40,14 @@ struct ProcessInfo {
   std::string user;
   ProcessState state = ProcessState::Unknown;
 
-  // Filled by CpuSampler, not by the backend: a backend only reports cumulative
-  // cpu_time_ns, because a percentage needs the previous refresh to exist.
+  // Set by CpuSampler (a backend only reports the cumulative cpu_time_ns).
   double cpu_percent = 0.0;
   double mem_percent = 0.0;
 
   std::uint64_t rss_bytes = 0;
   int thread_count = 0;
 
-  // Scheduling priority. Linux stores nice (-20..19); Windows stores the
-  // GetPriorityClass value. Both are directly settable through set_priority.
+  // Scheduling priority: nice (-20..19) on Linux, GetPriorityClass on Windows.
   int priority = 0;
 
   std::uint64_t cpu_time_ns = 0;
@@ -81,9 +72,7 @@ struct SystemInfo {
   std::uint64_t mem_available = 0;
   std::uint64_t total_cpu_time_ns = 0;
 
-  // Cumulative idle time (Linux idle+iowait, Windows idle). Kept so the overall
-  // CPU percentage is (delta total - delta idle) / delta total, the same
-  // two-refresh idea as a process, over the whole machine.
+  // Cumulative idle time (Linux idle+iowait, Windows idle).
   std::uint64_t idle_cpu_time_ns = 0;
 };
 

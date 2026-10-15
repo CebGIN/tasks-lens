@@ -21,8 +21,7 @@ namespace tasks_lens {
 
 namespace {
 
-// FILETIME counts 100-nanosecond intervals, so it shares one unit with the
-// Linux backend after this conversion: all CPU time in the monitor is ns.
+// FILETIME stores 100-nanosecond intervals; converts to nanoseconds.
 std::uint64_t filetime_to_ns(const FILETIME& ft) {
   ULARGE_INTEGER value;
   value.LowPart = ft.dwLowDateTime;
@@ -112,8 +111,7 @@ SystemInfo WindowsProcessSource::read_system() {
     CloseHandle(snapshot);
   }
 
-  // Load average and per-state counts have no direct Windows equivalent: the
-  // spec's summary fields stay at their defaults instead of inventing numbers.
+  // Load average and per-state counts have no Windows equivalent; they stay 0.
   return info;
 }
 
@@ -133,8 +131,7 @@ std::vector<ProcessInfo> WindowsProcessSource::read_processes() {
       proc.thread_count = static_cast<int>(entry.cntThreads);
       proc.command = wide_to_utf8(entry.szExeFile);
 
-      // Query-limited-information is enough for times and memory; protected
-      // processes refuse it, and then only the snapshot fields above remain.
+      // If this fails (protected process), only the snapshot fields above remain.
       HANDLE process = OpenProcess(
           PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE,
           entry.th32ProcessID);
@@ -182,8 +179,7 @@ std::vector<ThreadInfo> WindowsProcessSource::read_threads(int pid) {
       if (static_cast<int>(entry.th32OwnerProcessID) != pid) continue;
       ThreadInfo thread;
       thread.tid = static_cast<int>(entry.th32ThreadID);
-      // The snapshot exposes no thread state; a listed thread is one that
-      // exists, which the engine renders as running.
+      // The snapshot exposes no thread state; listed threads report Running.
       thread.state = ProcessState::Running;
       out.push_back(std::move(thread));
     } while (Thread32Next(snapshot, &entry));
@@ -193,9 +189,8 @@ std::vector<ThreadInfo> WindowsProcessSource::read_threads(int pid) {
   return out;
 }
 
-// TODO(windows): implement through OpenProcess + TerminateProcess, and
-// SuspendThread/ResumeThread over the thread snapshot. Left stubbed until the
-// backend can be compiled and verified on a Windows machine.
+// TODO(windows): implement via OpenProcess/TerminateProcess and
+// SuspendThread/ResumeThread; all four actions currently return false.
 bool WindowsProcessSource::terminate(int, bool) { return false; }
 bool WindowsProcessSource::suspend(int) { return false; }
 bool WindowsProcessSource::resume(int) { return false; }

@@ -3,27 +3,29 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <guayaba/Guayaba.hpp>
-#include <guayaba/Terminal/IOSTerminal.hpp>
 
 #include "Data/process_info.h"
-#include "Scripts/format.h"
 #include "Scripts/marquee.h"
+#include "Scripts/process_view.h"
+#include "Scripts/table_layout.h"
+#include "Scripts/text_util.h"
+#include "Scripts/viewport.h"
 
 namespace tasks_lens {
 
-// Header band style shared by the scene builder and the controller: one source
-// of truth for how a column header looks in its Normal state, active or not.
-inline void apply_header_normal_style(guayaba::Button* btn, bool is_active) {
+// Header band style for every state: the Normal background/text reflect whether
+// the column is the active sort key; Hover/Pressed/Disabled are fixed.
+inline void apply_header_style(guayaba::Button* btn, bool is_active) {
+  if (btn == nullptr) return;
+
+  // No horizontal margin: the button stretches across its column, so padding
+  // would only inflate the column's minimum. The vertical margin keeps it tall.
   guayaba::StyleBox normal;
-  // No horizontal margin: the button stretches across its column (anchored to
-  // both edges), so padding would only inflate the column's minimum past the
-  // width the column was given. The vertical margin keeps the header band tall.
   normal.set_content_margin(0, 1, 0, 1);
   normal.set_background_color(is_active ? guayaba::Color::BRIGHT_BLUE
                                         : guayaba::Color::BLUE);
@@ -31,76 +33,52 @@ inline void apply_header_normal_style(guayaba::Button* btn, bool is_active) {
   btn->set_text_color(guayaba::ButtonState::Normal,
                       is_active ? guayaba::Color::BRIGHT_GREEN
                                 : guayaba::Color::CYAN);
-}
 
-// One cell of the process table as text, padded to the column width.
-inline std::string cell_text(const ProcessInfo& proc, const std::string& key,
-                             int width) {
-  if (key == "pid") return pad(std::to_string(proc.pid), width);
-  if (key == "ppid") return pad(std::to_string(proc.ppid), width);
-  if (key == "user") return pad(proc.user, width);
-  if (key == "state") return pad(process_state_code(proc.state), width);
-  if (key == "cpu") return pad(format_percent(proc.cpu_percent), width);
-  if (key == "mem") return pad(format_percent(proc.mem_percent), width);
-  if (key == "res") return pad(format_bytes(proc.rss_bytes), width);
-  if (key == "thr") return pad(std::to_string(proc.thread_count), width);
-  if (key == "pri") return pad(std::to_string(proc.priority), width);
-  if (key == "time") return pad(format_cpu_time(proc.cpu_time_ns), width);
-  if (key == "command") return pad(proc.command, width);
-  return pad("", width);
-}
+  guayaba::StyleBox hover;
+  hover.set_content_margin(0, 1, 0, 1);
+  hover.set_background_color(guayaba::Color::BRIGHT_BLUE);
+  btn->set_stylebox(guayaba::ButtonState::Hover, hover);
+  btn->set_text_color(guayaba::ButtonState::Hover, guayaba::Color::BRIGHT_YELLOW);
 
-// Zombies and I/O-blocked processes are the two the spec singles out.
-inline const char* row_color(const ProcessInfo& proc) {
-  if (proc.state == ProcessState::Zombie) return guayaba::Color::BRIGHT_RED;
-  if (proc.state == ProcessState::DiskSleep) return guayaba::Color::BRIGHT_YELLOW;
-  return guayaba::Color::WHITE;
-}
+  guayaba::StyleBox pressed;
+  pressed.set_content_margin(0, 1, 0, 1);
+  pressed.set_background_color(guayaba::Color::BRIGHT_WHITE);
+  btn->set_stylebox(guayaba::ButtonState::Pressed, pressed);
+  btn->set_text_color(guayaba::ButtonState::Pressed, guayaba::Color::BLACK);
 
-// Less-than for the sort keys, so the active column and direction are one place.
-inline bool process_less(const ProcessInfo& a, const ProcessInfo& b,
-                         const std::string& key) {
-  if (key == "pid") return a.pid < b.pid;
-  if (key == "ppid") return a.ppid < b.ppid;
-  if (key == "user") return a.user < b.user;
-  if (key == "state") return a.state < b.state;
-  if (key == "cpu") return a.cpu_percent < b.cpu_percent;
-  if (key == "mem") return a.mem_percent < b.mem_percent;
-  if (key == "res") return a.rss_bytes < b.rss_bytes;
-  if (key == "thr") return a.thread_count < b.thread_count;
-  if (key == "pri") return a.priority < b.priority;
-  if (key == "time") return a.cpu_time_ns < b.cpu_time_ns;
-  if (key == "command") return a.command < b.command;
-  return a.cpu_percent < b.cpu_percent;
+  guayaba::StyleBox disabled;
+  disabled.set_content_margin(0, 1, 0, 1);
+  disabled.set_background_color(guayaba::Color::BLACK);
+  btn->set_stylebox(guayaba::ButtonState::Disabled, disabled);
+  btn->set_text_color(guayaba::ButtonState::Disabled, guayaba::Color::BLACK);
 }
 
 /*
     Owns the process table's presentation: the sort state, the header buttons,
-    and a window of row labels sized to the table's height.
+    and a window of row labels sized to the table's height. Rows are virtualized
+    (only capacity() labels exist per column) and render() writes the slice
+    [offset, offset+capacity) into them.
 
-    Rows are virtualized: only capacity() labels exist per column, and render()
-    writes the slice [offset, offset+capacity) into them. That keeps a machine
-    with hundreds of processes from building hundreds of nodes.
-
-    Attached to the table PanelContainer. The scene builder hands it the per
-    column rows VBox and header button; the Monitor script drives it.
+    Attached to the table PanelContainer; the scene builder hands it the per
+    column rows VBox and header button, and the Monitor script drives it.
 */
 class TableController : public guayaba::Script<guayaba::PanelContainer> {
  public:
-  struct Column {
+  // One column as handed in by the scene builder: identity plus the nodes the
+  // controller fills and wires.
+  struct ColumnSpec {
     std::string key;
     int width;
-    bool fills;     // grows to fill the columns the fixed ones leave
-    int min_width;  // floor for a filling column
+    int min_width;  // floor for the filling column
+    bool fills;     // grows to use the columns the fixed ones leave
     guayaba::NodeRef<guayaba::VBox> rows;
     guayaba::NodeRef<guayaba::Button> header;
   };
 
-  explicit TableController(std::vector<Column> columns)
+  explicit TableController(std::vector<ColumnSpec> columns)
       : columns_(std::move(columns)), pools_(columns_.size()),
-        last_text_(columns_.size()),
-        terminal_(guayaba::create_system_terminal()) {
-    for (size_t i = 0; i < columns_.size(); ++i) {
+        last_text_(columns_.size()) {
+    for (std::size_t i = 0; i < columns_.size(); ++i) {
       if (columns_[i].fills) flex_index_ = static_cast<int>(i);
       if (columns_[i].key == "command") marquee_index_ = static_cast<int>(i);
     }
@@ -112,14 +90,14 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
   // Next column becomes active, descending; re-selecting the active column
   // toggles direction.
   void cycle_sort() {
-    size_t index = 0;
-    for (size_t i = 0; i < columns_.size(); ++i) {
+    if (columns_.empty()) return;
+    std::size_t index = 0;
+    for (std::size_t i = 0; i < columns_.size(); ++i) {
       if (columns_[i].key == sort_key_) {
         index = i;
         break;
       }
     }
-    if (columns_.empty()) return;
     const std::string& next = columns_[(index + 1) % columns_.size()].key;
     if (next == sort_key_) {
       ascending_ = !ascending_;
@@ -132,28 +110,15 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
 
   int capacity() const { return capacity_; }
 
-  // The terminal's column count, or 0 when it cannot be read. The Monitor uses
-  // it to keep the status/summary lines from widening the layout: a fit_content
-  // label wider than the screen grows the whole layout VBox, which pushes the
-  // toolbar's right-aligned buttons off the edge.
-  int screen_cols() const {
-    return terminal_ ? terminal_->get_screen_size({0, 0}).x : 0;
-  }
-
   // --- Selection ------------------------------------------------------------
 
   // Index of the highlighted row in the current on-screen order, or -1 when
   // nothing is selected (or the table is empty). Resolved by render().
   int selected_index() const { return selected_index_; }
 
-  // PID of the highlighted process, or 0 when none. This is what actions and
-  // the priority editor will be pointed at.
-  int selected_pid() const { return selected_pid_; }
-
   // Moves the highlight by `delta` rows in the order `procs` is in. The cursor
-  // is remembered by PID, not by index, so a re-sort between frames (which is
-  // exactly what happens when sorting by %CPU) cannot slide the highlight onto
-  // a different process.
+  // is remembered by PID, so a re-sort between frames cannot slide the highlight
+  // onto a different process.
   void select_by(int delta, const std::vector<ProcessInfo>& procs) {
     if (procs.empty()) return;
     int index = index_of_pid(procs, selected_pid_);
@@ -162,17 +127,15 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
     selected_pid_ = procs[static_cast<std::size_t>(index)].pid;
   }
 
-  // Absolute selection, clamped; a caller can pass a large number to mean
-  // "the last row".
+  // Absolute selection, clamped; a caller can pass a large number for "last row".
   void select_to(int index, const std::vector<ProcessInfo>& procs) {
     if (procs.empty()) return;
     index = std::max(0, std::min(index, static_cast<int>(procs.size()) - 1));
     selected_pid_ = procs[static_cast<std::size_t>(index)].pid;
   }
 
-  // Selects the row under a click. Hit-tests against the first column's rows
-  // box (all columns share the same rows), using last frame's resolved rects,
-  // which is the same trade ScrollView makes.
+  // Selects the row under a click, hit-tested against the first column's rows
+  // box (all columns share the same rows) using last frame's resolved rect.
   bool select_at(guayaba::Vec2 point, const std::vector<ProcessInfo>& procs) {
     if (columns_.empty() || procs.empty()) return false;
     guayaba::VBox* rows = columns_[0].rows.get();
@@ -194,16 +157,14 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
     const int max_offset = std::max(0, static_cast<int>(procs.size()) - capacity_);
     offset_ = std::max(0, std::min(offset_, max_offset));
 
-    // Resolve the cursor against this frame's order. A selection that no longer
-    // exists (process gone, or the very first frame) falls back to the top row,
-    // so there is always a target for an action.
+    // Resolve the cursor against this frame's order; a selection that no longer
+    // exists falls back to the top row so an action always has a target.
     selected_index_ = index_of_pid(procs, selected_pid_);
     if (selected_index_ < 0 && !procs.empty()) {
       selected_index_ = 0;
       selected_pid_ = procs.front().pid;
     }
-    // Keep the highlighted row inside the window; the cursor is the scroll
-    // anchor, so it never scrolls off screen.
+    // Keep the highlighted row inside the window.
     if (selected_index_ >= 0) {
       if (selected_index_ < offset_) {
         offset_ = selected_index_;
@@ -214,9 +175,8 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
     }
 
     // The selected row's command is the one cell that can be wider than its
-    // column, so it is shown as a marquee that cycles the full text through the
-    // window. Advanced once per frame here, not per cell, so the clock is a
-    // property of the selection rather than of any one label.
+    // column, so it scrolls through a marquee. Advanced once per frame here, not
+    // per cell.
     if (marquee_index_ >= 0 && selected_index_ >= 0 &&
         selected_index_ < static_cast<int>(procs.size())) {
       marquee_.set(procs[static_cast<std::size_t>(selected_index_)].command,
@@ -226,8 +186,8 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
       marquee_.set("", 0);
     }
 
-    for (size_t c = 0; c < columns_.size(); ++c) {
-      const Column& column = columns_[c];
+    for (std::size_t c = 0; c < columns_.size(); ++c) {
+      const ColumnSpec& column = columns_[c];
       for (int i = 0; i < capacity_; ++i) {
         const int index = offset_ + i;
         guayaba::Label* label = pools_[c][static_cast<std::size_t>(i)].get();
@@ -254,15 +214,15 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
           last_text_[c][static_cast<std::size_t>(i)] = text;
         }
         label->set_text_color(color);
-        // The cursor band is a background, so the per-state text colour (zombie
-        // red, I/O-blocked yellow) stays readable on it.
+        // The cursor band is a background, so the per-state text colour stays
+        // readable on it.
         label->set_background_color(selected ? "BRIGHT_BLACK" : "BLACK");
       }
     }
   }
 
   void on_attached() override {
-    for (const Column& column : columns_) {
+    for (const ColumnSpec& column : columns_) {
       guayaba::Button* btn = column.header.get();
       if (btn == nullptr) continue;
       connect_script_signal("clicked", btn, this, &TableController::on_header_clicked);
@@ -272,7 +232,7 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
 
  private:
   void on_header_clicked() {
-    for (const Column& column : columns_) {
+    for (const ColumnSpec& column : columns_) {
       guayaba::Button* btn = column.header.get();
       if (btn != nullptr && btn->is_inside(guayaba::Input::mouse_pos)) {
         const std::string key = column.key;
@@ -289,15 +249,14 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
   }
 
   void refresh_headers() {
-    for (const Column& column : columns_) {
-      guayaba::Button* btn = column.header.get();
-      if (btn == nullptr) continue;
-      apply_header_normal_style(btn, column.key == sort_key_);
+    for (const ColumnSpec& column : columns_) {
+      apply_header_style(column.header.get(), column.key == sort_key_);
     }
   }
 
-  // Recomputes how many rows fit from the table's resolved rect and grows or
-  // shrinks each column's label pool to match. Pools only change on a resize.
+  // Recomputes capacity and the filling column's width from the tty size, and
+  // grows or shrinks each column's label pool to match. Pools only change on a
+  // resize.
   void ensure_capacity() {
     if (columns_.empty()) return;
 
@@ -306,59 +265,41 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
       header_height = columns_[0].header->get_rect().size.y;
     }
 
-    // The filling column takes whatever the fixed ones leave, so a long COMMAND
-    // is not clipped at its minimum while the rest of the row sits empty. Screen
-    // width minus both double borders (outer panel + table) and the gaps between
-    // columns is what the columns share; the fixed widths come off that and the
-    // remainder is the filling column's cell. Its minimum floors the result on a
-    // narrow terminal, where the table overflows and is clipped rather than
-    // shoving the later columns past the right edge. The layout agrees: the
-    // column's custom_minimum_size is that same floor and it is the one column
-    // with grow_x, so the width worked out here is the width it is given.
-    if (flex_index_ >= 0 && terminal_) {
-      const int screen_cols = terminal_->get_screen_size({0, 0}).x;
-      if (screen_cols > 0) {
-        int fixed = 0;
-        for (size_t i = 0; i < columns_.size(); ++i) {
-          if (static_cast<int>(i) != flex_index_) fixed += columns_[i].width;
-        }
-        const int gaps = static_cast<int>(columns_.size()) - 1;
-        const int width = std::max(columns_[flex_index_].min_width,
-                                   screen_cols - 4 - gaps - fixed);
-        columns_[flex_index_].width = width;
-      }
+    std::vector<int> widths;
+    std::vector<int> min_widths;
+    widths.reserve(columns_.size());
+    min_widths.reserve(columns_.size());
+    for (const ColumnSpec& column : columns_) {
+      widths.push_back(column.width);
+      min_widths.push_back(column.min_width);
     }
 
-    // How tall the table is this frame, measured from the terminal, not from any
-    // resolved rect. Every row label is a line in its column's minimum size, so
-    // the table - and the panel around it, which is sized by its child - resolve
-    // to at least the pool's height. Reading those rects back makes capacity a
-    // function of the previous capacity: the page can grow but never shrink.
-    // The tty size is the one value in the chain the pool does not inflate.
-    int screen_rows = terminal_ ? terminal_->get_screen_size({0, 0}).y : 0;
+    // The row count comes from the tty, not from a resolved rect: reading the
+    // pool's own rect back would make capacity a function of the previous
+    // capacity, so the page could grow but never shrink.
+    int screen_rows = terminal_rows();
     if (screen_rows <= 0) screen_rows = node->get_rect().size.y;
 
-    // Everything between the screen edge and the table's own rows: the outer
-    // panel border, plus every layout row above and below the table and their
-    // gaps. The parent's minimum minus the table's isolates exactly those rows,
-    // so it stays correct however many there are and whatever they wrap to.
-    int chrome = 2;  // outer panel border
+    // Everything between the screen edge and the table's rows: the outer panel
+    // border plus every layout row above and below the table.
+    int chrome = 2;
     if (guayaba::Control* parent =
             dynamic_cast<guayaba::Control*>(node->get_parent().get())) {
       chrome += parent->get_minimum_size().y - node->get_minimum_size().y;
     }
-    const int table_height = screen_rows - chrome;
 
-    // The table's own box: subtract its double border (2), the header row, and
-    // the one-cell gap between header and rows.
-    int rows_height = table_height - 2 - header_height - 1;
-    int capacity = std::max(1, rows_height);
-    if (capacity == capacity_ && pools_[0].size() == static_cast<size_t>(capacity)) {
+    const TableLayout layout =
+        compute_table_layout(screen_rows, terminal_cols(), chrome, header_height,
+                             widths, min_widths, flex_index_);
+    if (layout.has_flex) columns_[flex_index_].width = layout.flex_width;
+
+    const int capacity = layout.capacity;
+    if (capacity == capacity_ && pools_[0].size() == static_cast<std::size_t>(capacity)) {
       return;
     }
     capacity_ = capacity;
 
-    for (size_t c = 0; c < columns_.size(); ++c) {
+    for (std::size_t c = 0; c < columns_.size(); ++c) {
       guayaba::VBox* rows = columns_[c].rows.get();
       if (rows == nullptr) continue;
 
@@ -382,8 +323,7 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
     }
   }
 
-  // Index of `pid` in `procs`, or -1. The cursor is stored by PID rather than
-  // by position because the position is meaningless after a re-sort.
+  // Index of `pid` in `procs`, or -1.
   int index_of_pid(const std::vector<ProcessInfo>& procs, int pid) const {
     for (std::size_t i = 0; i < procs.size(); ++i) {
       if (procs[i].pid == pid) return static_cast<int>(i);
@@ -391,28 +331,20 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
     return -1;
   }
 
-  std::vector<Column> columns_;
+  std::vector<ColumnSpec> columns_;
   std::vector<std::vector<guayaba::NodeRef<guayaba::Label>>> pools_;
   std::vector<std::vector<std::string>> last_text_;
-  // The engine asks the tty for its size each frame; this is only to have that
-  // one true measurement the layout rects cannot give us. Never init()ed, so it
-  // does not touch raw mode.
-  std::unique_ptr<guayaba::IOSTerminal> terminal_;
 
   int capacity_ = 0;
   int offset_ = 0;
   int flex_index_ = -1;
-  // Index of the COMMAND column, whose selected cell scrolls; -1 if there is
-  // none. Set once from the column list.
+  // Index of the COMMAND column, whose selected cell scrolls; -1 if none.
   int marquee_index_ = -1;
-  // The scroll state for that one cell.
   Marquee marquee_;
-  // The cursor. 0 means "nothing"; PID is unique, so it survives a re-sort.
-  // selected_index_ is derived from it every frame in render().
+  // The cursor, by PID (0 = none); selected_index_ is derived each render().
   int selected_pid_ = 0;
   int selected_index_ = -1;
-  // PID ascending: a stable order. CPU% (the obvious "top" default) reshuffles
-  // several times a second because the deltas swing, which reads as flicker.
+  // PID ascending is the stable default; CPU% reshuffles several times a second.
   std::string sort_key_ = "pid";
   bool ascending_ = true;
 };

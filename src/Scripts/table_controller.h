@@ -1,6 +1,7 @@
 #ifndef TASKS_LENS_SCRIPTS_TABLE_CONTROLLER_H
 #define TASKS_LENS_SCRIPTS_TABLE_CONTROLLER_H
 
+#include <algorithm>
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -128,15 +129,50 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
   }
 
   int capacity() const { return capacity_; }
-  int offset() const { return offset_; }
 
-  void scroll_by(int rows, std::size_t total) {
-    scroll_to(offset_ + rows, total);
+  // --- Selection ------------------------------------------------------------
+
+  // Index of the highlighted row in the current on-screen order, or -1 when
+  // nothing is selected (or the table is empty). Resolved by render().
+  int selected_index() const { return selected_index_; }
+
+  // PID of the highlighted process, or 0 when none. This is what actions and
+  // the priority editor will be pointed at.
+  int selected_pid() const { return selected_pid_; }
+
+  // Moves the highlight by `delta` rows in the order `procs` is in. The cursor
+  // is remembered by PID, not by index, so a re-sort between frames (which is
+  // exactly what happens when sorting by %CPU) cannot slide the highlight onto
+  // a different process.
+  void select_by(int delta, const std::vector<ProcessInfo>& procs) {
+    if (procs.empty()) return;
+    int index = index_of_pid(procs, selected_pid_);
+    if (index < 0) index = 0;  // nothing selected yet: start at the top
+    index = std::max(0, std::min(index + delta, static_cast<int>(procs.size()) - 1));
+    selected_pid_ = procs[static_cast<std::size_t>(index)].pid;
   }
 
-  void scroll_to(int offset, std::size_t total) {
-    const int max_offset = std::max(0, static_cast<int>(total) - capacity_);
-    offset_ = std::max(0, std::min(offset, max_offset));
+  // Absolute selection, clamped; a caller can pass a large number to mean
+  // "the last row".
+  void select_to(int index, const std::vector<ProcessInfo>& procs) {
+    if (procs.empty()) return;
+    index = std::max(0, std::min(index, static_cast<int>(procs.size()) - 1));
+    selected_pid_ = procs[static_cast<std::size_t>(index)].pid;
+  }
+
+  // Selects the row under a click. Hit-tests against the first column's rows
+  // box (all columns share the same rows), using last frame's resolved rects,
+  // which is the same trade ScrollView makes.
+  bool select_at(guayaba::Vec2 point, const std::vector<ProcessInfo>& procs) {
+    if (columns_.empty() || procs.empty()) return false;
+    guayaba::VBox* rows = columns_[0].rows.get();
+    if (rows == nullptr) return false;
+    const guayaba::Rect rect = rows->get_rect();
+    if (!rect.contains(point)) return false;
+    const int index = offset_ + (point.y - rect.top());
+    if (index < 0 || index >= static_cast<int>(procs.size())) return false;
+    selected_pid_ = procs[static_cast<std::size_t>(index)].pid;
+    return true;
   }
 
   // Writes the current window of `procs` into the row labels. Call once per
@@ -147,6 +183,25 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
     const int max_offset = std::max(0, static_cast<int>(procs.size()) - capacity_);
     offset_ = std::max(0, std::min(offset_, max_offset));
 
+    // Resolve the cursor against this frame's order. A selection that no longer
+    // exists (process gone, or the very first frame) falls back to the top row,
+    // so there is always a target for an action.
+    selected_index_ = index_of_pid(procs, selected_pid_);
+    if (selected_index_ < 0 && !procs.empty()) {
+      selected_index_ = 0;
+      selected_pid_ = procs.front().pid;
+    }
+    // Keep the highlighted row inside the window; the cursor is the scroll
+    // anchor, so it never scrolls off screen.
+    if (selected_index_ >= 0) {
+      if (selected_index_ < offset_) {
+        offset_ = selected_index_;
+      } else if (selected_index_ >= offset_ + capacity_) {
+        offset_ = selected_index_ - capacity_ + 1;
+      }
+      offset_ = std::max(0, std::min(offset_, max_offset));
+    }
+
     for (size_t c = 0; c < columns_.size(); ++c) {
       const Column& column = columns_[c];
       for (int i = 0; i < capacity_; ++i) {
@@ -156,10 +211,12 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
 
         std::string text;
         const char* color = guayaba::Color::WHITE;
+        bool selected = false;
         if (index < static_cast<int>(procs.size())) {
           const ProcessInfo& proc = procs[static_cast<std::size_t>(index)];
           text = cell_text(proc, column.key, column.width);
           color = row_color(proc);
+          selected = index == selected_index_;
         } else {
           text = pad("", column.width);
         }
@@ -169,6 +226,9 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
           last_text_[c][static_cast<std::size_t>(i)] = text;
         }
         label->set_text_color(color);
+        // The cursor band is a background, so the per-state text colour (zombie
+        // red, I/O-blocked yellow) stays readable on it.
+        label->set_background_color(selected ? "BRIGHT_BLACK" : "BLACK");
       }
     }
   }
@@ -294,6 +354,15 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
     }
   }
 
+  // Index of `pid` in `procs`, or -1. The cursor is stored by PID rather than
+  // by position because the position is meaningless after a re-sort.
+  int index_of_pid(const std::vector<ProcessInfo>& procs, int pid) const {
+    for (std::size_t i = 0; i < procs.size(); ++i) {
+      if (procs[i].pid == pid) return static_cast<int>(i);
+    }
+    return -1;
+  }
+
   std::vector<Column> columns_;
   std::vector<std::vector<guayaba::NodeRef<guayaba::Label>>> pools_;
   std::vector<std::vector<std::string>> last_text_;
@@ -305,6 +374,10 @@ class TableController : public guayaba::Script<guayaba::PanelContainer> {
   int capacity_ = 0;
   int offset_ = 0;
   int flex_index_ = -1;
+  // The cursor. 0 means "nothing"; PID is unique, so it survives a re-sort.
+  // selected_index_ is derived from it every frame in render().
+  int selected_pid_ = 0;
+  int selected_index_ = -1;
   // PID ascending: a stable order. CPU% (the obvious "top" default) reshuffles
   // several times a second because the deltas swing, which reads as flicker.
   std::string sort_key_ = "pid";

@@ -37,12 +37,14 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   Monitor(std::unique_ptr<ProcessSource> source,
           guayaba::NodeRef<guayaba::Label> summary_tasks,
           guayaba::NodeRef<guayaba::Label> summary_mem,
+          guayaba::NodeRef<guayaba::Label> selection,
           guayaba::NodeRef<guayaba::Label> status,
           guayaba::NodeRef<guayaba::PanelContainer> table,
           TableController* table_controller)
       : source_(std::move(source)),
         summary_tasks_(summary_tasks),
         summary_mem_(summary_mem),
+        selection_(selection),
         status_(status),
         table_(table),
         table_controller_(table_controller) {}
@@ -58,8 +60,11 @@ class Monitor : public guayaba::Script<guayaba::Node> {
 
     sort_processes();
     if (table_controller_ != nullptr) table_controller_->render(processes_);
+    update_selection();
 
-    if (message_timer_ > 0.0) {
+    // A pending confirmation owns the status line until it is answered, so the
+    // prompt is not cleared out from under the user.
+    if (confirm_pid_ == 0 && message_timer_ > 0.0) {
       message_timer_ -= delta_time;
       if (message_timer_ <= 0.0 && status_.get() != nullptr) {
         status_.get()->set_text(help_text_);
@@ -70,13 +75,44 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   bool on_input(const guayaba::InputEvent& event) override {
     if (event.type == guayaba::InputEvent::Type::MOUSE_WHEEL) {
       if (table_.get() != nullptr && table_.get()->is_inside(event.mouse_pos)) {
-        scroll_rows(-event.wheel_delta);
+        // The wheel moves the cursor rather than the window: the cursor is the
+        // scroll anchor, so the two can never drift apart.
+        select(-event.wheel_delta);
         return true;
       }
       return false;
     }
 
+    // A left press on a data row selects it. A press on a header Button is
+    // consumed by the Button before it reaches this root script (controls
+    // route before the root), so this only ever sees the rows.
+    if (event.type == guayaba::InputEvent::Type::MOUSE_BUTTON) {
+      if (event.mouse_button == guayaba::MouseButton::LEFT && event.pressed &&
+          table_.get() != nullptr && table_.get()->is_inside(event.mouse_pos) &&
+          table_controller_ != nullptr) {
+        return table_controller_->select_at(event.mouse_pos, processes_);
+      }
+      return false;
+    }
+
     if (event.type != guayaba::InputEvent::Type::KEY || !event.pressed) return false;
+
+    // A pending force-kill confirmation swallows every key until it is answered,
+    // so no other action can fire while the prompt is up.
+    if (confirm_pid_ != 0) {
+      if (event.key == guayaba::Key::Y) {
+        const int pid = confirm_pid_;
+        confirm_pid_ = 0;
+        terminate_pid(pid, true);
+        return true;
+      }
+      if (event.key == guayaba::Key::N || event.key == guayaba::Key::ESCAPE) {
+        confirm_pid_ = 0;
+        set_message("Cancelled");
+        return true;
+      }
+      return true;
+    }
 
     switch (event.key) {
       case guayaba::Key::Q:
@@ -89,24 +125,39 @@ class Monitor : public guayaba::Script<guayaba::Node> {
       case guayaba::Key::I:
         cycle_interval();
         return true;
+      case guayaba::Key::K:
+        // k terminates politely; Shift+K forces termination behind a separate
+        // confirmation, because SIGKILL cannot be undone.
+        if (event.shift || event.text == U'K') {
+          request_force_kill();
+        } else {
+          terminate_selected(false);
+        }
+        return true;
+      case guayaba::Key::Z:
+        set_suspended(true);
+        return true;
+      case guayaba::Key::C:
+        set_suspended(false);
+        return true;
       case guayaba::Key::UP:
-        scroll_rows(-1);
+        select(-1);
         return true;
       case guayaba::Key::DOWN:
-        scroll_rows(1);
+        select(1);
         return true;
       case guayaba::Key::PAGE_UP:
-        scroll_rows(-page_step());
+        select(-page_step());
         return true;
       case guayaba::Key::PAGE_DOWN:
-        scroll_rows(page_step());
+        select(page_step());
         return true;
       case guayaba::Key::HOME:
-        if (table_controller_ != nullptr) table_controller_->scroll_to(0, processes_.size());
+        if (table_controller_ != nullptr) table_controller_->select_to(0, processes_);
         return true;
       case guayaba::Key::END:
         if (table_controller_ != nullptr) {
-          table_controller_->scroll_to(static_cast<int>(processes_.size()), processes_.size());
+          table_controller_->select_to(static_cast<int>(processes_.size()), processes_);
         }
         return true;
       default:
@@ -169,7 +220,17 @@ class Monitor : public guayaba::Script<guayaba::Node> {
     const bool ascending = table_controller_->ascending();
     std::sort(processes_.begin(), processes_.end(),
               [&key, ascending](const ProcessInfo& a, const ProcessInfo& b) {
-                return ascending ? process_less(a, b, key) : process_less(b, a, key);
+                // Primary key: the active column, in the active direction.
+                const bool a_first =
+                    ascending ? process_less(a, b, key) : process_less(b, a, key);
+                const bool b_first =
+                    ascending ? process_less(b, a, key) : process_less(a, b, key);
+                if (a_first != b_first) return a_first;
+                // Tie (e.g. every root process under USER): fall back to PID
+                // ascending. PID is unique, so the comparator is a total order
+                // and equivalent rows keep their position across refreshes
+                // instead of reshuffling with whatever order readdir returned.
+                return a.pid < b.pid;
               });
   }
 
@@ -188,10 +249,92 @@ class Monitor : public guayaba::Script<guayaba::Node> {
     set_message("Refresh interval: " + std::to_string(static_cast<int>(interval_)) + "s");
   }
 
-  void scroll_rows(int rows) {
+  void select(int rows) {
     if (table_controller_ != nullptr) {
-      table_controller_->scroll_by(rows, processes_.size());
+      table_controller_->select_by(rows, processes_);
     }
+  }
+
+  // Mirrors the highlighted row into its own label, which is also where the
+  // actions and the priority editor will read their target from.
+  void update_selection() {
+    if (selection_.get() == nullptr) return;
+    std::string text = "Selected: -";
+    if (table_controller_ != nullptr) {
+      const int index = table_controller_->selected_index();
+      if (index >= 0 && index < static_cast<int>(processes_.size())) {
+        const ProcessInfo& proc = processes_[static_cast<std::size_t>(index)];
+        text = "Selected PID " + std::to_string(proc.pid) + "  " + proc.command;
+      }
+    }
+    if (text != selection_text_) {
+      selection_.get()->set_text(text);
+      selection_text_ = text;
+    }
+  }
+
+  // The row under the cursor, or nullptr when there is none. Every action is
+  // aimed through this one accessor.
+  const ProcessInfo* selected_process() const {
+    if (table_controller_ == nullptr) return nullptr;
+    const int index = table_controller_->selected_index();
+    if (index < 0 || index >= static_cast<int>(processes_.size())) return nullptr;
+    return &processes_[static_cast<std::size_t>(index)];
+  }
+
+  void terminate_selected(bool force) {
+    const ProcessInfo* proc = selected_process();
+    if (proc == nullptr) {
+      set_message("No process selected");
+      return;
+    }
+    terminate_pid(proc->pid, force);
+  }
+
+  void terminate_pid(int pid, bool force) {
+    if (source_->terminate(pid, force)) {
+      set_message(std::string(force ? "SIGKILL" : "SIGTERM") + " -> PID " +
+                  std::to_string(pid));
+      elapsed_ = interval_;  // re-read now so the row goes away this frame
+    } else {
+      set_message(report_failure(pid));
+    }
+  }
+
+  void request_force_kill() {
+    const ProcessInfo* proc = selected_process();
+    if (proc == nullptr) {
+      set_message("No process selected");
+      return;
+    }
+    confirm_pid_ = proc->pid;
+    set_message("SIGKILL PID " + std::to_string(proc->pid) + " (" + proc->command +
+                ")? [y/N]");
+  }
+
+  void set_suspended(bool suspend) {
+    const ProcessInfo* proc = selected_process();
+    if (proc == nullptr) {
+      set_message("No process selected");
+      return;
+    }
+    const int pid = proc->pid;
+    const bool ok = suspend ? source_->suspend(pid) : source_->resume(pid);
+    if (ok) {
+      set_message(std::string(suspend ? "SIGSTOP" : "SIGCONT") + " -> PID " +
+                  std::to_string(pid) +
+                  (suspend ? " (suspended)" : " (resumed)"));
+      elapsed_ = interval_;  // re-read now so STATE shows the change
+    } else {
+      set_message(report_failure(pid));
+    }
+  }
+
+  // Spec item 15: a process that vanished, or one this user cannot signal, is a
+  // message rather than a crash. One bool cannot tell the two apart, so the
+  // wording covers both.
+  std::string report_failure(int pid) const {
+    return "PID " + std::to_string(pid) + ": failed (gone or no permission)";
   }
 
   int page_step() const {
@@ -209,6 +352,8 @@ class Monitor : public guayaba::Script<guayaba::Node> {
 
   guayaba::NodeRef<guayaba::Label> summary_tasks_;
   guayaba::NodeRef<guayaba::Label> summary_mem_;
+  guayaba::NodeRef<guayaba::Label> selection_;
+  std::string selection_text_;
   guayaba::NodeRef<guayaba::Label> status_;
   guayaba::NodeRef<guayaba::PanelContainer> table_;
   TableController* table_controller_ = nullptr;
@@ -227,8 +372,11 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   bool has_previous_ = false;
 
   double message_timer_ = 0.0;
+  // PID awaiting a y/n answer for a forced termination; 0 when no prompt is up.
+  int confirm_pid_ = 0;
   std::string help_text_ =
-      "[q] Quit  [s] Sort  [i] Interval  [Up/Down PgUp/PgDn] Scroll  [wheel] Scroll";
+      "[q] Quit  [s] Sort  [i] Interval  [\u2191/\u2193] Select  [k] Terminate  "
+      "[K] Force  [z] Suspend  [c] Resume";
 };
 
 }  // namespace tasks_lens

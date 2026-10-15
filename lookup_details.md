@@ -168,9 +168,9 @@ Each backend `.cpp` is `#ifdef`-guarded; the consumer `CMakeLists.txt` globs
   user. Written but **not compiled anywhere yet**; actions and thread CPU time are
   stubbed. No load average / per-state counts exist on Windows (fields stay 0).
 * **Verification**: `./build/tasks-lens --dump` prints two summaries a second apart
-  plus a top-10 by CPU to stdout (no terminal takeover). Temporary, until the table
-  is driven by the real model. Build and `--dump` are the only checks; the Windows
-  path cannot be built on this machine.
+  plus a top-10 by CPU to stdout (no terminal takeover); the live table is driven
+  by the same model. The interactive TUI needs a real tty (it can be exercised
+  under a pseudo-terminal). The Windows path cannot be built on this machine.
 
 ---
 
@@ -205,6 +205,17 @@ Each backend `.cpp` is `#ifdef`-guarded; the consumer `CMakeLists.txt` globs
   **`pid` ascending** — CPU% (the "top" default) reshuffles several times a
   second because the deltas swing, which reads as flicker. `format.h` holds the
   cell/byte/time/percent formatting.
+  - **Selection cursor**: the highlighted row is drawn by setting every cell
+    `Label`'s `set_background_color(...)` to a BRIGHT_BLACK band (the text colour,
+    including the per-state colours, is left alone so it stays readable). The
+    cursor is stored by **PID**, not index, and resolved against the current order
+    each `render()`, so a re-sort (sorting by %CPU) cannot slide it onto a
+    different process. `render()` also scrolls the window so the cursor stays on
+    screen — the cursor is the scroll anchor, so there is no independent scroll.
+  - **Tie-break**: the sort comparator falls back to PID ascending when the active
+    column ties (e.g. every `root` under USER), making it a total order. Without
+    it `std::sort` (not stable) plus the arbitrary `readdir` order reshuffled the
+    tied block every refresh.
   - **Capacity measurement (the self-inflation trap)**: capacity must come from
     the **tty size** (`guayaba::create_system_terminal()->get_screen_size({0,0}).y`,
     a fresh `TIOCGWINSZ` each call), not from any resolved rect. Every row label
@@ -236,12 +247,24 @@ Each backend `.cpp` is `#ifdef`-guarded; the consumer `CMakeLists.txt` globs
     Left/Center/Right, moves the block without changing wrap or minimum). Row
     cells stay left-aligned.
 - **`monitor.h`** — `Script<Node>` on the **root**. Owns `ProcessSource`,
-  `CpuSampler`, `SystemInfo`, the snapshot, and the summary/status labels.
-  Every frame: sort by the table's sort state → `table->render(procs)`. Every
-  **interval** (default 1 s, `i` cycles 1/2/5/10): re-read `/proc` + sample +
-  update summary. `on_input` handles `q`, `s`, `i`, arrows/PgUp/PgDn/Home/End;
-  mouse wheel over the table scrolls. Runs after controls, so it only sees keys
-  nothing else consumed.
+  `CpuSampler`, `SystemInfo`, the snapshot, and the summary/selection/status
+  labels. Every frame: sort by the table's sort state → `table->render(procs)`
+  → mirror the cursor into the `Selected:` label. Every **interval** (default
+  1 s, `i` cycles 1/2/5/10): re-read `/proc` + sample + update summary. Runs
+  after controls, so it only sees keys nothing else consumed.
+  - **Navigation** (selection): `↑/↓` move the cursor one row, `PgUp/PgDn` a page,
+    `Home/End` to the ends, the wheel moves it a few rows, and a left click on a
+    data row selects it (a header click is consumed by its sort `Button` first).
+  - **Actions on the cursor** (spec items 9/14/15): `k` → SIGTERM, `Shift+K` →
+    SIGKILL behind a separate `[y/N]` confirmation, `z` → SIGSTOP, `c` →
+    SIGCONT. `Shift+K` is detected via `event.text == U'K'` because the Linux
+    backend reports printable keys with `shift=false` (the shifted character is
+    already in `text`). A successful action sets `elapsed_ = interval_` so the
+    next `on_process` re-reads `/proc` immediately (the row disappears / the STATE
+    updates); a failure shows `PID N: failed (gone or no permission)` — the
+    backend returns one `bool`, so the two cases read the same to the user.
+    While a confirmation is pending its keys are swallowed and the status line
+    is not auto-cleared.
 - `SystemInfo.idle_cpu_time_ns` (Linux idle+iowait, Windows idle) is what lets
   `Monitor` show overall `CPU: NN.N%` from `(Δtotal − Δidle)/Δtotal`.
 
@@ -257,5 +280,86 @@ its minimum — this was why the table was one row tall until the preset was set
 `cmake --build build` now works: the submodule is re-pinned to the engine tag
 with the input API (v1.1.1-alpha). Earlier in Phase C it was verified by
 compiling `src/` directly against the engine working copy, before the tag existed.
+
+---
+
+## 10. New engine controls (repo `GuayabaTUIEngine`, pending pin)
+
+The app consumes the engine through the **`external/GuayabaTUIEngine` submodule**,
+pinned to a tag. New generic controls are built in the engine's own working copy
+(`/home/cebrian/Documentos/Code/GuayabaTUIEngine`) and become usable here only
+after the engine is committed/tagged/pushed and the pin advances
+(`git -C external/GuayabaTUIEngine checkout <tag>` then
+`git add external/GuayabaTUIEngine`). Until then, features that need them are
+blocked.
+
+### `LineEdit` (built, verified in the engine)
+
+Single-line text field: `guayaba::LineEdit : Control`, in
+`include/guayaba/Nodes/UI/LineEdit.hpp`.
+
+- Text: `set_text` / `get_text` / `clear`. Placeholder: `set_placeholder` /
+  `get_placeholder`.
+- Editing: `set_max_length` (counts codepoints; ≤0 is unlimited), `get_caret` /
+  `set_caret` (byte offset into the UTF-8 text, always snapped to a codepoint
+  boundary).
+- Echo: `set_secret(bool)`, `set_secret_character(char32_t)` (rendering masks the
+  text; `get_text()` still returns it).
+- Appearance: `get_stylebox` / `set_stylebox`, `set_text_color`,
+  `set_placeholder_color`, `set_background_color`.
+- Signals: `"text_changed"(std::string)` (fires only when the value really
+  changes), `"text_submitted"(std::string)` (on ENTER).
+- Behavior: `FocusMode::CLICK`; it takes focus on a left click **itself** — the
+  engine does not auto-focus on click, and `Tab`/`Escape` are declined so the
+  scene keeps them (the app will use Escape to cancel/defocus). Single line; the
+  caret cell is drawn reverse-video and the text scrolls horizontally to keep it
+  visible.
+
+Intended app use: the name filter (spec 13) and the priority editor (spec 10) —
+focus it with a hotkey, read `text_submitted`/`text_changed`, unfocus with Escape.
+
+### `Graph` (built, verified in the engine)
+
+Plot/sparkline: `guayaba::Graph : Control`, in
+`include/guayaba/Nodes/UI/Graph.hpp`. No StyleBox — it draws edge to edge.
+
+- Data: `set_values` (oldest→newest), `push_value`, `set_capacity`/`get_capacity`
+  (a rolling window; `push_value` drops the oldest past capacity).
+- Range: auto by default (min/max of the visible slice, widened to a ±0.5 band
+  when flat); `set_range(min,max)` / `clear_range()` to pin it (CPU wants 0..100).
+- `set_fill(bool)` — filled bars (default) or a one-cell-per-column sparkline;
+  `set_line_color`, `set_background_color`.
+- Right-aligned, newest at the right edge. One row is the degenerate sparkline;
+  H rows gives H×8 sub-cell levels via the `▁▂▃▄▅▆▇█` ladder.
+- Intended app use: per-process CPU history (spec 7) — the app owns the ring
+  buffer, `Graph` renders it.
+
+### `ListView` (built, verified in the engine)
+
+Selectable vertical list: `guayaba::ListView : Control`, in
+`include/guayaba/Nodes/UI/ListView.hpp`.
+
+- Items: `set_items(std::vector<std::string>)`, `get_items`, `item_count`.
+- Selection: `selected()` (-1 = none), `set_selected`, `select_first/last`,
+  `move_selection`; the cursor index is clamped and the window follows.
+- Scroll window: `scroll()`, `set_scroll`, `visible_count()` (virtual contents —
+  a thousand rows cost the same to draw as ten).
+- Appearance: `get_stylebox`/`set_stylebox`, `set_text_color`,
+  `set_selection_background_color` (default BRIGHT_BLACK), `set_selection_text_color`,
+  and a sparse `set_item_color(index, color)` for per-row tints.
+- Signals: `"selection_changed"(int)` (only when it really moves),
+  `"item_activated"(int)` (ENTER or a second click).
+- `FocusMode::CLICK`; takes focus and selects on click; keys UP/DOWN/PgUp/PgDn/Home/End;
+  wheel scrolls the window; declines TAB/ESCAPE.
+- Intended app use: threads of a process (spec 6) and — with the app flattening
+  the hierarchy and indenting the strings — the process tree (spec 5).
+
+### Not planned
+
+- A `TreeView`: the spec asks for a parent→child *view*, not collapse/expand. A
+  flattened, indented `ListView` covers it, so a dedicated tree control would be
+  scope the spec does not require.
+- A modal `Dialog`: the force-kill confirmation is already handled on the bottom
+  status line (`[y/N]`), so a modal is not needed for spec 14.
 
 

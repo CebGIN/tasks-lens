@@ -228,6 +228,12 @@ std::unique_ptr<Node> build_scene() {
   summary_mem->set_text_color(Color::WHITE);
   summary_mem->set_fit_content(true);
 
+  // Highlights the row under the cursor; later the target of the actions.
+  NodeRef<Label> selection = layout->add_child<Label>("selection");
+  selection->set_text({"Selected: -"});
+  selection->set_text_color(Color::BRIGHT_GREEN);
+  selection->set_fit_content(true);
+
   // 3. Process table (headers double as sort buttons)
   TableParts parts = build_table(layout);
 
@@ -246,7 +252,8 @@ std::unique_ptr<Node> build_scene() {
   std::unique_ptr<tasks_lens::ProcessSource> source =
       tasks_lens::create_system_process_source();
   auto monitor_ref = root->attach_script<tasks_lens::Monitor>(
-      std::move(source), summary_tasks, summary_mem, help, table, controller);
+      std::move(source), summary_tasks, summary_mem, selection, help, table,
+      controller);
   tasks_lens::Monitor* monitor = monitor_ref.script();
   if (monitor != nullptr) help->set_text(monitor->help_text());
 

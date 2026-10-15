@@ -265,6 +265,19 @@ Each backend `.cpp` is `#ifdef`-guarded; the consumer `CMakeLists.txt` globs
     backend returns one `bool`, so the two cases read the same to the user.
     While a confirmation is pending its keys are swallowed and the status line
     is not auto-cleared.
+  - **Input line** (`prompt`, an engine `LineEdit`, spec 10/13): `f` focuses it
+    as a live case-insensitive name/user filter; `p` focuses it as a priority
+    (nice) editor, left empty with the current value shown in the prompt.
+    `Enter` submits, `Escape` cancels. While focused it consumes typing, so the
+    hotkeys stay quiet and only `Escape` reaches the root script. The filter
+    drives `visible_` (the snapshot filtered + sorted); `processes_` stays the
+    full snapshot, and the table, cursor and actions all read `visible_`.
+  - **Detail views** (spec 5/6/7): `t` threads, `r` process tree, `g` CPU history.
+    The engine has no node visibility, so each is a full-screen overlay
+    `PanelContainer` built on demand, added to the root (draws on top, routes
+    input first) and `queue_free()`d on `Escape`. Threads/tree use an engine
+    `ListView`; history uses an engine `Graph` fed by `history_`, a capped CPU%
+    ring per pid keyed by pid so it survives the table's re-sorting.
 - `SystemInfo.idle_cpu_time_ns` (Linux idle+iowait, Windows idle) is what lets
   `Monitor` show overall `CPU: NN.N%` from `(Δtotal − Δidle)/Δtotal`.
 

@@ -4,8 +4,11 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -34,6 +37,13 @@ namespace tasks_lens {
     global shortcuts firing.
 */
 class Monitor : public guayaba::Script<guayaba::Node> {
+  // What the bottom input line is currently for. None means the field is idle
+  // and the hotkeys are live; the other two focus it and gate the hotkeys.
+  enum class InputMode { None, Filter, Priority };
+
+  // Which full-screen detail view is open, if any.
+  enum class ViewKind { None, Threads, Tree, History };
+
  public:
   Monitor(std::unique_ptr<ProcessSource> source,
           guayaba::NodeRef<guayaba::Label> summary_tasks,
@@ -91,6 +101,11 @@ class Monitor : public guayaba::Script<guayaba::Node> {
     if (table_controller_ != nullptr) table_controller_->render(visible_);
     update_selection();
 
+    if (view_ != ViewKind::None && content_dirty_) {
+      update_overlay();
+      content_dirty_ = false;
+    }
+
     // A pending confirmation owns the status line until it is answered, so the
     // prompt is not cleared out from under the user.
     if (confirm_pid_ == 0 && message_timer_ > 0.0) {
@@ -103,7 +118,8 @@ class Monitor : public guayaba::Script<guayaba::Node> {
 
   bool on_input(const guayaba::InputEvent& event) override {
     if (event.type == guayaba::InputEvent::Type::MOUSE_WHEEL) {
-      if (table_.get() != nullptr && table_.get()->is_inside(event.mouse_pos)) {
+      if (view_ == ViewKind::None && table_.get() != nullptr &&
+          table_.get()->is_inside(event.mouse_pos)) {
         // The wheel moves the cursor rather than the window: the cursor is the
         // scroll anchor, so the two can never drift apart.
         select(-event.wheel_delta);
@@ -116,9 +132,9 @@ class Monitor : public guayaba::Script<guayaba::Node> {
     // consumed by the Button before it reaches this root script (controls
     // route before the root), so this only ever sees the rows.
     if (event.type == guayaba::InputEvent::Type::MOUSE_BUTTON) {
-      if (event.mouse_button == guayaba::MouseButton::LEFT && event.pressed &&
-          table_.get() != nullptr && table_.get()->is_inside(event.mouse_pos) &&
-          table_controller_ != nullptr) {
+      if (view_ == ViewKind::None && event.mouse_button == guayaba::MouseButton::LEFT &&
+          event.pressed && table_.get() != nullptr &&
+          table_.get()->is_inside(event.mouse_pos) && table_controller_ != nullptr) {
         return table_controller_->select_at(event.mouse_pos, visible_);
       }
       return false;
@@ -153,6 +169,14 @@ class Monitor : public guayaba::Script<guayaba::Node> {
       return false;
     }
 
+    // A detail view is modal: its own ListView consumes the navigation keys and
+    // Escape closes it. Everything else is swallowed, so table hotkeys cannot
+    // fire against a process the user cannot see.
+    if (view_ != ViewKind::None) {
+      if (event.key == guayaba::Key::ESCAPE) close_overlay();
+      return true;
+    }
+
     switch (event.key) {
       case guayaba::Key::Q:
         guayaba::SceneManager::get_instance().stop_running();
@@ -184,6 +208,15 @@ class Monitor : public guayaba::Script<guayaba::Node> {
         return true;
       case guayaba::Key::P:
         enter_priority();
+        return true;
+      case guayaba::Key::T:
+        open_threads();
+        return true;
+      case guayaba::Key::R:
+        open_tree();
+        return true;
+      case guayaba::Key::G:
+        open_history();
         return true;
       case guayaba::Key::UP:
         select(-1);
@@ -235,7 +268,30 @@ class Monitor : public guayaba::Script<guayaba::Node> {
 
     system_ = system;
     processes_ = std::move(processes);
+    record_history();
+    content_dirty_ = true;
     update_summary();
+  }
+
+  // Appends this refresh's CPU% to each live process's series and forgets the
+  // ones that exited. The history view is the only reader; keying by pid is what
+  // lets a series survive the table's re-sorting.
+  void record_history() {
+    std::unordered_set<int> alive;
+    alive.reserve(processes_.size());
+    for (const ProcessInfo& proc : processes_) {
+      alive.insert(proc.pid);
+      std::deque<double>& series = history_[proc.pid];
+      series.push_back(proc.cpu_percent);
+      while (series.size() > kHistorySamples) series.pop_front();
+    }
+    for (auto it = history_.begin(); it != history_.end();) {
+      if (alive.count(it->first) == 0) {
+        it = history_.erase(it);
+      } else {
+        ++it;
+      }
+    }
   }
 
   void update_summary() {
@@ -515,6 +571,188 @@ class Monitor : public guayaba::Script<guayaba::Node> {
     return "PID " + std::to_string(pid) + ": failed (gone or no permission)";
   }
 
+  // --- Detail views (threads, tree, history) --------------------------------
+  //
+  // The engine has no node visibility, so a view is an overlay: a full-screen
+  // panel added to the root on demand and queue_free()d on Escape. It draws on
+  // top (last child) and routes input first, so the table and its hotkeys are
+  // covered until it is closed. Built here rather than in the scene because it
+  // exists only while a view is open.
+
+  void open_threads() { open_process_view(ViewKind::Threads); }
+  void open_tree() { open_process_view(ViewKind::Tree); }
+
+  void open_history() { open_process_view(ViewKind::History); }
+
+  void open_process_view(ViewKind kind) {
+    const ProcessInfo* proc = selected_process();
+    if (proc == nullptr) {
+      set_message("No process selected");
+      return;
+    }
+    open_overlay(kind, proc->pid);
+  }
+
+  void open_overlay(ViewKind kind, int pid) {
+    close_overlay();
+    view_ = kind;
+    detail_pid_ = pid;
+
+    guayaba::NodeRef<guayaba::PanelContainer> panel =
+        node->add_child<guayaba::PanelContainer>("overlay");
+    panel->set_anchor_preset(guayaba::AnchorPreset::FullRect);
+    panel->set_clip_children(true);
+    panel->get_stylebox().set_background_color(guayaba::Color::BLACK);
+    panel->get_stylebox().set_border_style(guayaba::StyleBorder::DOUBLE);
+    panel->get_stylebox().set_border_width(1);
+    panel->get_stylebox().set_border_color(guayaba::Color::BRIGHT_CYAN);
+    panel->get_stylebox().set_content_margin(0, 0, 0, 0);
+
+    guayaba::NodeRef<guayaba::VBox> box =
+        panel->add_child<guayaba::VBox>("overlay_layout");
+    box->set_anchor_preset(guayaba::AnchorPreset::FullRect);
+    box->set_content_alignment(guayaba::ContentAlignment::Begin);
+    box->set_separation(1);
+
+    guayaba::NodeRef<guayaba::Label> title =
+        box->add_child<guayaba::Label>("overlay_title");
+    title->set_fit_content(true);
+    title->set_text_color(guayaba::Color::BRIGHT_CYAN);
+
+    if (kind == ViewKind::History) {
+      guayaba::NodeRef<guayaba::Graph> graph =
+          box->add_child<guayaba::Graph>("overlay_graph");
+      graph->set_anchor_preset(guayaba::AnchorPreset::FullRect);
+      graph->set_grow_y(guayaba::Grow::Both);
+      graph->set_line_color(guayaba::Color::BRIGHT_GREEN);
+      // Auto-range: a single process sits near 0% of the whole machine, so a
+      // fixed 0..100 span would flatten its own variation below one cell. The
+      // Graph frames the samples it has, which is what shows the shape.
+      overlay_graph_ = graph;
+    } else {
+      guayaba::NodeRef<guayaba::ListView> list =
+          box->add_child<guayaba::ListView>("overlay_list");
+      list->set_anchor_preset(guayaba::AnchorPreset::FullRect);
+      list->set_grow_y(guayaba::Grow::Both);
+      list->set_text_color(guayaba::Color::WHITE);
+      list->grab_focus();
+      overlay_list_ = list;
+    }
+
+    overlay_ = panel;
+    overlay_title_ = title;
+    content_dirty_ = true;
+    update_overlay();
+  }
+
+  void close_overlay() {
+    view_ = ViewKind::None;
+    detail_pid_ = 0;
+    if (overlay_.get() != nullptr) overlay_.get()->queue_free();
+    overlay_ = {};
+    overlay_title_ = {};
+    overlay_list_ = {};
+    overlay_graph_ = {};
+  }
+
+  // Refills the open view from the data. Called on open and whenever the
+  // snapshot changes, so a stopped thread's state or a new sample shows up.
+  void update_overlay() {
+    if (view_ == ViewKind::None) return;
+
+    if (view_ == ViewKind::Threads) {
+      const std::vector<ThreadInfo> threads = source_->read_threads(detail_pid_);
+      std::vector<std::string> items;
+      items.reserve(threads.size());
+      for (const ThreadInfo& thread : threads) items.push_back(thread_line(thread));
+      if (overlay_title_.get() != nullptr) {
+        overlay_title_.get()->set_text("PID " + std::to_string(detail_pid_) + ": " +
+                                       std::to_string(items.size()) +
+                                       " threads   [Esc] back");
+      }
+      if (overlay_list_.get() != nullptr) overlay_list_.get()->set_items(std::move(items));
+      return;
+    }
+
+    if (view_ == ViewKind::Tree) {
+      std::vector<std::string> items = tree_lines();
+      if (overlay_title_.get() != nullptr) {
+        overlay_title_.get()->set_text("Process tree, " + std::to_string(items.size()) +
+                                       " processes   [Esc] back");
+      }
+      if (overlay_list_.get() != nullptr) overlay_list_.get()->set_items(std::move(items));
+      return;
+    }
+
+    if (overlay_title_.get() != nullptr) {
+      overlay_title_.get()->set_text("CPU history, PID " + std::to_string(detail_pid_) +
+                                     "   [Esc] back");
+    }
+    if (overlay_graph_.get() != nullptr) {
+      const auto it = history_.find(detail_pid_);
+      if (it != history_.end()) {
+        overlay_graph_.get()->set_values(
+            std::vector<double>(it->second.begin(), it->second.end()));
+      } else {
+        overlay_graph_.get()->set_values({});
+      }
+    }
+  }
+
+  std::string thread_line(const ThreadInfo& thread) const {
+    return pad(std::to_string(thread.tid), 7) + " " + process_state_code(thread.state) +
+           "  " + format_cpu_time(thread.cpu_time_ns) + "  " + thread.name;
+  }
+
+  // The whole machine as an indented parent -> child list: the same information
+  // the table has, ordered by the hierarchy instead of by a column. Roots are the
+  // processes whose parent is not in the snapshot; anything left (a cycle, or a
+  // parent that vanished mid-read) is shown at depth zero so nothing is lost.
+  std::vector<std::string> tree_lines() const {
+    std::unordered_map<int, const ProcessInfo*> by_pid;
+    std::unordered_map<int, std::vector<int>> children;
+    for (const ProcessInfo& proc : processes_) by_pid[proc.pid] = &proc;
+    for (const ProcessInfo& proc : processes_) {
+      if (proc.ppid != proc.pid) children[proc.ppid].push_back(proc.pid);
+    }
+    for (auto& entry : children) std::sort(entry.second.begin(), entry.second.end());
+
+    std::vector<std::string> lines;
+    lines.reserve(processes_.size());
+    std::unordered_set<int> visited;
+    for (const ProcessInfo& proc : processes_) {
+      if (by_pid.find(proc.ppid) == by_pid.end()) {
+        append_subtree(proc.pid, 0, children, by_pid, visited, lines);
+      }
+    }
+    for (const ProcessInfo& proc : processes_) {
+      append_subtree(proc.pid, 0, children, by_pid, visited, lines);
+    }
+    return lines;
+  }
+
+  static void append_subtree(
+      int pid, int depth, const std::unordered_map<int, std::vector<int>>& children,
+      const std::unordered_map<int, const ProcessInfo*>& by_pid,
+      std::unordered_set<int>& visited, std::vector<std::string>& lines) {
+    if (depth > 64 || visited.count(pid) != 0) return;
+    visited.insert(pid);
+
+    const auto it = by_pid.find(pid);
+    std::string text(static_cast<std::size_t>(depth) * 2, ' ');
+    if (depth > 0) text += "\u2514 ";
+    text += std::to_string(pid) + "  " +
+            (it != by_pid.end() ? it->second->command : std::string());
+    lines.push_back(std::move(text));
+
+    const auto cit = children.find(pid);
+    if (cit != children.end()) {
+      for (int child : cit->second) {
+        append_subtree(child, depth + 1, children, by_pid, visited, lines);
+      }
+    }
+  }
+
   int page_step() const {
     if (table_controller_ == nullptr) return 1;
     return std::max(1, table_controller_->capacity() - 1);
@@ -528,10 +766,6 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   std::unique_ptr<ProcessSource> source_;
   CpuSampler sampler_;
 
-  // What the bottom input line is currently for. None means the field is idle
-  // and the hotkeys are live; the other two focus it and gate the hotkeys.
-  enum class InputMode { None, Filter, Priority };
-
   guayaba::NodeRef<guayaba::Label> summary_tasks_;
   guayaba::NodeRef<guayaba::Label> summary_mem_;
   guayaba::NodeRef<guayaba::Label> selection_;
@@ -544,12 +778,27 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   InputMode mode_ = InputMode::None;
   std::string filter_;
 
+  // The open detail view and its nodes. All empty when no view is up.
+  ViewKind view_ = ViewKind::None;
+  int detail_pid_ = 0;
+  guayaba::NodeRef<guayaba::PanelContainer> overlay_;
+  guayaba::NodeRef<guayaba::Label> overlay_title_;
+  guayaba::NodeRef<guayaba::ListView> overlay_list_;
+  guayaba::NodeRef<guayaba::Graph> overlay_graph_;
+
+  // One capped CPU% series per pid, for the history view (spec 7). Keyed by pid
+  // so it survives the table's re-sorting, and pruned when a process exits.
+  static constexpr std::size_t kHistorySamples = 120;
+  std::unordered_map<int, std::deque<double>> history_;
+
   SystemInfo system_;
   // The full snapshot, filtered and sorted into `visible_` only when something
   // that changes the view does - see on_process.
   std::vector<ProcessInfo> processes_;
   std::vector<ProcessInfo> visible_;
   bool dirty_ = true;
+  // Set on every snapshot so an open detail view refills from fresh data.
+  bool content_dirty_ = true;
   std::string last_sort_key_;
   bool last_ascending_ = true;
 
@@ -567,8 +816,8 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   // PID awaiting a y/n answer for a forced termination; 0 when no prompt is up.
   int confirm_pid_ = 0;
   std::string help_text_ =
-      "q Quit  s Sort  i Interval  f Filter  p Nice  k Term  K Force  z Stop  "
-      "c Cont  \u2191\u2193 Move";
+      "q Quit  s Sort  i Int  \u2191\u2193 Move  f Filter  p Nice  t Threads  "
+      "r Tree  g Hist  k Kill  K Force  z Stop  c Cont";
 };
 
 }  // namespace tasks_lens

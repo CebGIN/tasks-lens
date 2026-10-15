@@ -16,7 +16,7 @@ de `src/Data/process_info.h`.
 | `/proc/loadavg` | carga media | `read_system` |
 | `/proc/meminfo` | memoria total, disponible, libre, buffers, caché | `read_system` |
 
-## 3.2. Primitivas (líneas 25-54)
+## 3.2. Primitivas (líneas 27-54)
 
 - **`clock_ticks_per_sec()`** — devuelve `sysconf(_SC_CLK_TCK)` (habitualmente
   100). Se cachea en una variable `static` porque no cambia mientras el programa
@@ -34,7 +34,7 @@ de `src/Data/process_info.h`.
   PID válido. `/proc` mezcla PID con `self`, `meminfo`, `cpuinfo`, etc.; una
   entrada es un PID solo si **todos** sus caracteres son dígitos.
 
-## 3.3. `parse_stat`: el análisis de `/proc/<pid>/stat` (líneas 70-109)
+## 3.3. `parse_stat`: el análisis de `/proc/<pid>/stat` (líneas 72-108)
 
 Esta es la función central. Un ejemplo real de la línea:
 
@@ -108,11 +108,12 @@ Traduce la letra de estado a `ProcessState`. Dos equivalencias no son obvias:
 No hay una letra aparte para "bloqueado en E/S": ese es el estado `D`
 (`DiskSleep`), y es el `TableController` el que lo pinta de amarillo.
 
-## 3.5. `read_system` (líneas 158-245)
+## 3.5. `read_system` (líneas 239-251)
 
-Cuatro lecturas independientes; si una falla, las otras siguen funcionando.
+`read_system` delega en cuatro ayudantes locales; si una lectura falla, las otras
+siguen funcionando.
 
-### `/proc/stat` (líneas 162-181)
+### `/proc/stat` — `read_cpu_times` (líneas 154-172)
 
 Primera línea:
 
@@ -131,7 +132,7 @@ Se suman los primeros 8 valores en `ticks`, y por separado se acumulan los
 
 El resultado va a `total_cpu_time_ns` e `idle_cpu_time_ns`.
 
-### Conteo de estados (líneas 183-205)
+### Conteo de estados — `read_task_counts` (líneas 175-196)
 
 Un segundo recorrido de `/proc` que lee solo `stat` y cuenta `total`, `running`,
 `stopped` y `zombie`. Es una pasada **separada** de `read_processes`, así que el
@@ -139,25 +140,25 @@ resumen y la tabla pueden diferir en un proceso o dos si uno termina entre una y
 otra. El `switch` no cuenta `Sleeping` ni `DiskSleep` ni `Idle`: están en
 `total`, pero no en ninguna subcuenta.
 
-### `/proc/loadavg` (líneas 208-211)
+### `/proc/loadavg` — `read_load_avg` (líneas 198-203)
 
 Tres números separados por espacios, directos a `load_avg[3]`.
 
-### `/proc/meminfo` (líneas 214-242)
+### `/proc/meminfo` — `read_memory` (líneas 205-235)
 
 Un recorrido línea a línea que toma `MemTotal`, `MemFree`, `MemAvailable`,
 `Buffers` y `Cached`. Dos decisiones:
 
-- **Respaldo (línea 238):** si `MemAvailable` es `0` (núcleos antiguos a los que
+- **Respaldo (línea 231):** si `MemAvailable` es `0` (núcleos antiguos a los que
   les falta el campo), se calcula como `mem_free + buffers + cached`.
-- **`used` se deriva, nunca se lee (líneas 239-241):**
+- **`used` se deriva, nunca se lee (líneas 232-234):**
   `mem_used = mem_total - mem_available`. El núcleo no expone `MemUsed`, y
   calcularlo como `total - free` ignoraría la caché de páginas.
 
 Los valores de `meminfo` están en **kB**: se multiplican por `1024` para
 guardarlos en bytes, igual que el resto de los campos.
 
-## 3.6. `read_processes` (líneas 247-294)
+## 3.6. `read_processes` (líneas 253-300)
 
 Recorre las entradas de `/proc`, salta las que no son PID y, para cada una:
 
@@ -171,29 +172,31 @@ Recorre las entradas de `/proc`, salta las que no son PID y, para cada una:
      La guarda `rss > 0` evita convertir en un número gigante un valor negativo
      de un proceso que está terminando.
    - `priority = nice`.
-2. **`status` → uid (líneas 277-281 y `read_uid`, 111-125).** Este archivo no se
+2. **`status` → uid (líneas 283-287 y `read_uid`, 110-124).** Este archivo no se
    analiza por espacios: es un bloque de `Clave:\tvalor`, y el código busca el
    literal `"\nUid:"`. Luego lee el **primer** número de esa línea (el UID real);
    los otros tres (efectivo, guardado, de sistema de archivos) se ignoran.
-3. **`cmdline` → command (líneas 283-287).** `normalize_cmdline` (líneas
-   148-154) reemplaza cada byte nulo (`\0`) por un espacio y elimina los espacios
+3. **`cmdline` → command (líneas 289-292).** `normalize_cmdline` (líneas
+   145-151) reemplaza cada byte nulo (`\0`) por un espacio y elimina los espacios
    finales. El archivo es el vector `argv` en crudo, separado por NUL, no una
    línea de texto; sin esta conversión cada cadena se cortaría en el primer NUL.
-4. **Respaldo para hilos del núcleo (línea 287):**
+4. **Respaldo para hilos del núcleo (línea 293):**
    `if (proc.command.empty()) proc.command = fields.comm;`. Un hilo del núcleo
    tiene `cmdline` **vacío** (no tiene `argv`), así que se usa `comm` de `stat`
    — de ahí salen nombres como `[kthreadd]` o `[kworker/0:1]`.
 
-## 3.7. `username` (líneas 129-144)
+## 3.7. `username` y la caché de usuarios (líneas 127-142)
 
-Usa `getpwuid_r` (variante reentrante) y **cachea** el resultado por uid en un
-`std::unordered_map` `static`. La razón: en una máquina ociosa muchos procesos
-pertenecen a `root`, y cada `getpwuid` puede consultar servicios externos (NSS).
-Sin la caché serían decenas de consultas por refresco. Si la consulta falla, se
-guarda el uid numérico como nombre, de modo que la columna `USER` muestra `1000`
-en lugar de quedar vacía.
+`username(uid, cache)` usa `getpwuid_r` (variante reentrante) y **cachea** el
+resultado por uid en el `std::unordered_map` que recibe. La caché es un miembro
+privado del backend, `user_cache_` (`linux_process_source.h`), que vive lo que
+vive la fuente; `read_processes` le pasa la referencia. La razón: en una máquina
+ociosa muchos procesos pertenecen a `root`, y cada `getpwuid` puede consultar
+servicios externos (NSS). Sin la caché serían decenas de consultas por refresco.
+Si la consulta falla, se guarda el uid numérico como nombre, de modo que la
+columna `USER` muestra `1000` en lugar de quedar vacía.
 
-## 3.8. `read_threads` (líneas 296-322)
+## 3.8. `read_threads` (líneas 302-328)
 
 Es una copia reducida de `read_processes`:
 
@@ -207,7 +210,7 @@ Es una copia reducida de `read_processes`:
 - Si el proceso ya no existe, `opendir` falla y se devuelve un vector vacío; no
   es un error.
 
-## 3.9. Acciones (líneas 324-338)
+## 3.9. Acciones (líneas 330-344)
 
 Todas usan llamadas de sistema; no leen nada de `/proc`:
 

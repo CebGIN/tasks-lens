@@ -30,15 +30,36 @@ documento es autocontenido, pero las referencias cruzadas permiten profundizar.
 
 `UML_tasks-lens.drawio` contiene dos páginas:
 
-- **Diagrama de clases**: las clases de las tres capas (tipos de datos,
-  `ProcessSource` y sus backends, `CpuSampler`, `Monitor`, `TableController`,
-  `Marquee`, y las utilidades), con sus atributos, métodos y relaciones
-  (herencia, composición, agregación, asociación y dependencia).
+- **Diagrama de clases**: los tipos de datos y las clases de las tres capas
+  (`ProcessSource` y sus backends, `CpuSampler`, `Monitor`, `TableController`,
+  `Marquee`, `HistoryStore`), los structs auxiliares (`MonitorToolbar`,
+  `TableController::ColumnSpec`, `ConfirmDialog`, `DetailOverlay`) y los módulos
+  de utilidades (`format.h`, `ui_style.h`,
+  `text_util.h`, `viewport.h`, `process_view.h`, `process_sort.h`,
+  `priority_input.h`, `process_tree.h`, `table_layout.h`, `dump.cpp`), con sus
+  atributos, métodos y relaciones (herencia, composición, agregación,
+  asociación y dependencia).
 - **Leyenda**: el significado de los símbolos `+`, `-`, `#` y de cada tipo de
   flecha.
 
-Los nombres de las clases y sus miembros coinciden con el código; los detalles de
-cada una están en los documentos de la tabla de arriba.
+## Estructura del código
+
+Los dos `Script` (`Monitor` y `TableController`) conservan la lógica propia de su
+nodo: su estado, la entrada y la coordinación de sus hijos. La lógica que no
+depende de un nodo vive en módulos aparte, de modo que las clases de arriba no
+crezcan sin control:
+
+- **Datos** (`src/Data/`): tipos neutrales, `ProcessSource` y sus backends,
+  `CpuSampler`, `HistoryStore` y `process_tree.h`.
+- **Interfaz** (`src/Scripts/`): los `Script`, `Marquee`, y las utilidades
+  (`format.h`, `ui_style.h`, `text_util.h`, `viewport.h`, `process_view.h`,
+  `process_sort.h`, `priority_input.h`, `table_layout.h`, y los constructores
+  `confirm_dialog.h` y `detail_overlay.h`).
+- **Arranque** (`src/main.cpp`, `src/dump.cpp`): construcción del grafo de escena
+  y el modo `--dump` sin terminal.
+
+Los nombres de las clases, structs y funciones coinciden con el código; los
+detalles de cada pieza están en los documentos de la tabla de arriba.
 
 ## Convenciones de estos documentos
 

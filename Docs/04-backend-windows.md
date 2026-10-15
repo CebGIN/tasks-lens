@@ -24,15 +24,15 @@ Windows (`#ifdef _WIN32`) y usa las API de Tool Help (`tlhelp32.h`) y PSAPI
 
 La misma regla que en Linux: todo el tiempo de CPU se lleva a nanosegundos.
 
-- **`filetime_to_ns(FILETIME)`** (líneas 26-31): `FILETIME` cuenta intervalos de
+- **`filetime_to_ns(FILETIME)`** (líneas 25-30): `FILETIME` cuenta intervalos de
   100 ns, así que basta multiplicar por `100`. Tras esto, un `FILETIME` y un
   contador de `/proc` comparten unidad, y el mismo `CpuSampler` sirve para
   ambos.
-- **`wide_to_utf8`** (líneas 33-43): convierte `wchar_t` a UTF-8 con
+- **`wide_to_utf8`** (líneas 32-42): convierte `wchar_t` a UTF-8 con
   `WideCharToMultiByte`, para que los nombres sean `std::string` como en el
   resto del programa.
 
-## 4.3. `read_system` (líneas 83-118)
+## 4.3. `read_system` (líneas 82-116)
 
 - **`GetSystemTimes`** devuelve idle, kernel y user. Detalle importante (línea
   90): el tiempo de núcleo **ya incluye** el tiempo ocioso, así que
@@ -45,7 +45,7 @@ La misma regla que en Linux: todo el tiempo de CPU se lleva a nanosegundos.
   hay equivalente directo en Windows; el código, a propósito, no inventa
   números.
 
-## 4.4. `read_processes` (líneas 120-170)
+## 4.4. `read_processes` (líneas 118-167)
 
 Un recorrido con `Process32FirstW` / `Process32NextW`. De la entrada `PROCESSENTRY32W`
 salen, sin abrir el proceso, `pid`, `ppid`, `thread_count` y `command` (el
@@ -65,7 +65,7 @@ Si tiene éxito, se obtienen:
 Si `OpenProcess` falla (procesos protegidos), solo quedan los campos que da la
 instantánea. El proceso se agrega igualmente.
 
-## 4.5. `read_threads` (líneas 172-194)
+## 4.5. `read_threads` (líneas 169-190)
 
 Recorre la instantánea de hilos y conserva los que pertenecen al proceso pedido
 (`th32OwnerProcessID == pid`). Detalle a tener en cuenta: la instantánea **no

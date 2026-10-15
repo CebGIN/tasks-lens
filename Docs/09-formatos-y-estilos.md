@@ -3,7 +3,10 @@
 Reúne los ayudantes de formato de texto, el aspecto común de los botones y el
 funcionamiento de la marquesina.
 
-## 9.1. Formato de celdas (`src/Scripts/format.h`)
+## 9.1. Texto y formato (`src/Scripts/text_util.h` y `src/Scripts/format.h`)
+
+`text_util.h` reúne los ayudantes de texto; `format.h`, los de unidades. Todos son
+funciones `inline` sin estado.
 
 ### `pad(text, width)`
 
@@ -11,6 +14,21 @@ Alinea a la izquierda y **recorta o rellena** hasta `width`. Todas las celdas de
 una columna tienen el mismo tamaño, lo que mantiene las columnas alineadas. Si
 el texto es más largo que `width`, se corta; si es más corto, se rellena con
 espacios a la derecha.
+
+### `truncate(text, max)`
+
+Corta por **bytes** y agrega puntos suspensivos (`…`). Acota el ancho mínimo de la
+etiqueta, que es lo que el layout necesita.
+
+### `clip_cells(text, max_cells)`
+
+Recorta por **puntos de código** (con `decode_utf8`), de modo que un glifo
+multibyte nunca se parte por la mitad.
+
+### `pad_cells(text, width)`
+
+Recorta o rellena hasta `width` **puntos de código**; es la variante que usa la
+marquesina para no desalinear con glifos multibyte.
 
 ### `format_bytes(bytes)`
 
@@ -37,7 +55,7 @@ media.
 Definido en `src/Data/process_info.h`: devuelve la letra canónica (`R`, `S`,
 `D`, `T`, `Z`, `I`, `?`).
 
-## 9.2. Texto por celda (`src/Scripts/table_controller.h`, líneas 37-51)
+## 9.2. Texto por celda (`src/Scripts/process_view.h`, líneas 16-30)
 
 `cell_text(proc, key, width)` elige el formateador según la clave de la columna:
 
@@ -53,12 +71,14 @@ Definido en `src/Data/process_info.h`: devuelve la letra canónica (`R`, `S`,
 
 ## 9.3. Colores
 
-- **Colores por estado de fila** (`row_color`, `table_controller.h` líneas
-  54-58): zombie en rojo brillante, dormido en disco (`D`) en amarillo brillante,
-  el resto en blanco.
-- **Cabecera de columna** (`apply_header_normal_style`, líneas 22-34): fondo azul
-  (azul brillante si es la columna activa) y texto cian (verde brillante si es la
-  activa). Es la única fuente de verdad del aspecto de una cabecera.
+- **Colores por estado de fila** (`row_color`, `src/Scripts/process_view.h`,
+  líneas 34-38): zombie en rojo brillante, dormido en disco (`D`) en amarillo
+  brillante, el resto en blanco.
+- **Cabecera de columna** (`apply_header_style(btn, active)`,
+  `table_controller.h`, líneas 23-54): fija los cuatro estados del `Button` de
+  cabecera. El estado Normal es fondo azul con texto cian, y pasa a azul y verde
+  brillantes cuando `active` es verdadero (la columna es la clave de orden
+  actual). Es la única fuente de verdad del aspecto de una cabecera.
 - **Fila seleccionada:** fondo `BRIGHT_BLACK` como banda, para que el color de
   texto del estado siga siendo legible por encima.
 

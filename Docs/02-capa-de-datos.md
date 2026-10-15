@@ -124,3 +124,15 @@ mismo `#if` decide qué archivo `.cpp` entra en la compilación (ver
   completa con los porcentajes.
 
 Ninguno de esos consumidores conoce la plataforma; solo ven la interfaz.
+
+## 2.5. Otros módulos de datos
+
+Junto a los tipos y la interfaz, `src/Data/` aloja dos ayudantes que también son
+neutrales respecto de la plataforma:
+
+- **`history_store.h`** — `HistoryStore` guarda una serie acotada de `%CPU` por
+  PID para la vista de historial (ver
+  [05-cpu-y-memoria.md](05-cpu-y-memoria.md)).
+- **`process_tree.h`** — `build_process_tree_lines()` convierte un snapshot en
+  una lista indentada padre → hijo para la vista de árbol (ver
+  [08-monitor-y-hotkeys.md](08-monitor-y-hotkeys.md)).

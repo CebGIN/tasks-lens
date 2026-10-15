@@ -34,7 +34,7 @@ Detalle en [03-backend-linux.md](03-backend-linux.md).
 - **`/proc/<pid>/stat`** es una línea de campos numerados desde 1. Se usan el 3
   (estado), 4 (PPID), 14 y 15 (`utime` y `stime`), 19 (nice), 20 (número de
   hilos) y 24 (RSS, **en páginas**). La tabla campo → índice está en
-  [03-backend-linux.md](03-backend-linux.md#33-parse_stat-el-análisis-de-procpidstat-líneas-70-109).
+  [03-backend-linux.md](03-backend-linux.md#33-parse_stat-el-análisis-de-procpidstat-líneas-72-108).
 - **`/proc/<pid>/status`** es un bloque de `Clave: valor` con tabulaciones; se
   busca la línea `Uid:` y se toma el primer número (el UID real).
 - **`/proc/<pid>/cmdline`** es el vector `argv` en crudo, separado por bytes
@@ -98,7 +98,9 @@ Del mismo enfoque de dos refrescos, sobre la máquina completa:
 ```
 
 El tiempo ocioso se resta del total y lo que queda es lo ocupado. Lo calcula el
-`Monitor`, no el `CpuSampler`.
+propio `CpuSampler::apply()` (y se lee con `system_cpu_percent()`); el `Monitor`
+solo lo muestra en el resumen. Ver
+[05-cpu-y-memoria.md](05-cpu-y-memoria.md).
 
 ---
 

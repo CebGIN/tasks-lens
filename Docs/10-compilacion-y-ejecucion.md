@@ -78,9 +78,10 @@ sin tomar el terminal:
 ./build/tasks-lens --dump
 ```
 
-`run_dump()` (`src/main.cpp`, líneas 156-193) toma **dos** instantáneas
-separadas por un segundo (para que los deltas de CPU no sean cero), las pasa por
-el `CpuSampler` y muestra por `stdout` un extracto tipo `top`: el resumen del
+`run_dump()` (`src/dump.cpp`, líneas 15-52; declarado en `src/dump.h`) toma
+**dos** instantáneas separadas por un segundo (para que los deltas de CPU no sean
+cero), las pasa por el `CpuSampler` y muestra por `stdout` un extracto tipo
+`top`: el resumen del
 sistema y los diez procesos con más CPU. No hay toma de pantalla, así que se
 puede usar en una tubería o redirigir a un archivo. Es la forma más rápida de
 comprobar que la capa de datos funciona.
@@ -128,18 +129,29 @@ tasks-lens/
 ├── Docs/                          ← esta documentación
 ├── src/
 │   ├── main.cpp                   ← grafo de escena y arranque
+│   ├── dump.cpp / dump.h          ← ruta de verificación `--dump`
 │   ├── Data/                      ← capa de datos neutral
 │   │   ├── process_info.h
 │   │   ├── process_source.h
 │   │   ├── process_source_factory.cpp
 │   │   ├── cpu_sampler.h / .cpp
+│   │   ├── history_store.h
+│   │   ├── process_tree.h
 │   │   └── platform/
 │   │       ├── linux/linux_process_source.h / .cpp
 │   │       └── windows/windows_process_source.h / .cpp
 │   └── Scripts/                   ← lógica de interfaz (solo cabeceras)
 │       ├── monitor.h
 │       ├── table_controller.h
+│       ├── table_layout.h
+│       ├── process_view.h
+│       ├── process_sort.h
+│       ├── text_util.h
+│       ├── viewport.h
 │       ├── format.h
+│       ├── priority_input.h
+│       ├── confirm_dialog.h
+│       ├── detail_overlay.h
 │       ├── ui_style.h
 │       └── marquee.h
 └── external/

@@ -1,6 +1,6 @@
 # 06. Interfaz TUI
 
-La interfaz se construye en `build_scene()` (`src/main.cpp`, líneas 198-341) y
+La interfaz se construye en `build_scene()` (`src/main.cpp`, líneas 125-264) y
 utiliza el motor GuayabaTUIEngine. Este documento describe cómo se arma la
 pantalla y las reglas de layout que hay que respetar.
 
@@ -55,19 +55,19 @@ filas de más no se dibujen sobre la línea de ayuda.
 
 ## 6.3. Las filas, una por una
 
-### 1. Fila de título (líneas 218-237)
+### 1. Fila de título (líneas 144-161)
 
 Un `HBox` con el título a la izquierda y los botones globales a la derecha. El
 título crece (`grow_x`) para empujar los botones contra el borde derecho. Los
 botones son **Sort**, **Interval** y **Quit**.
 
-### 2. Fila de búsqueda (líneas 241-263)
+### 2. Fila de búsqueda (líneas 164-186)
 
 La etiqueta `Search:` y un `LineEdit` (el filtro por nombre o usuario), más un
 botón **Clear**. El `LineEdit` es la vía del ratón hacia el filtrado: toma el
 foco al hacer clic. El propio campo se encarga de capturar el foco.
 
-### 3 y 4. Resumen del sistema (líneas 266-274)
+### 3 y 4. Resumen del sistema (líneas 189-197)
 
 Dos etiquetas que el `Monitor` rellena en cada refresco:
 
@@ -80,14 +80,14 @@ Su texto se recorta al ancho de pantalla con `fit_width` (ver
 `fit_content` más ancha que la pantalla agrandaría el `VBox` completo y
 desplazaría los botones alineados a la derecha fuera del borde.
 
-### 5. Fila de acciones (líneas 278-300)
+### 5. Fila de acciones (líneas 201-223)
 
 A la izquierda, la etiqueta `selected` con el proceso seleccionado; a la derecha,
 los botones de acción: **Kill**, **Force**, **Stop**, **Cont**, **Nice**,
 **Threads**, **Tree** y **History**. La etiqueta de selección crece para que los
 botones queden pegados al borde derecho.
 
-### 6. La tabla (líneas 89-151)
+### 6. La tabla (líneas 60-120)
 
 Es la estructura más elaborada. Se compone de:
 
@@ -107,12 +107,16 @@ Cada columna es un `VBox` que apila:
 2. Un `VBox` de filas, que el `TableController` llena con una etiqueta por fila
    visible.
 
+El aspecto de cada cabecera lo fija `apply_header_style()`
+(`table_controller.h`), que `create_header_button()` aplica al construir el
+botón; ver [09-formatos-y-estilos.md](09-formatos-y-estilos.md).
+
 El ancho de cada columna se fija con `set_custom_minimum_size(Vec2{width, 0})`.
 La columna `COMMAND` es la única con `fills: true`: conserva su ancho mínimo
 pero `grow_x` le permite absorber todo el espacio horizontal que las columnas
 fijas dejan libre, para no cortar los comandos largos.
 
-### 7. Línea de ayuda / estado (líneas 306-308)
+### 7. Línea de ayuda / estado (líneas 229-231)
 
 Una etiqueta con los atajos de teclado y, cuando corresponde, el filtro activo o
 un mensaje de estado.
@@ -121,8 +125,9 @@ un mensaje de estado.
 
 `build_scene()` termina asociando los dos scripts:
 
-1. `table->attach_script<tasks_lens::TableController>(columnas)` — la tabla pasa
-   a tener un controlador que gobierna orden, selección y ventana de filas.
+1. `table->attach_script<tasks_lens::TableController>(std::move(parts.columns))`
+   — la tabla pasa a tener un controlador que gobierna orden, selección y ventana
+   de filas.
 2. `root->attach_script<tasks_lens::Monitor>(source, ..., controlador)` — la
    raíz pasa a tener el "cerebro", que recibe el `ProcessSource`, todas las
    etiquetas, los botones y el puntero al controlador.

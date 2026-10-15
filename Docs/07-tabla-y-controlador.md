@@ -8,8 +8,8 @@ ordenada y la dibuja.
 
 ## 7.1. Columnas
 
-El `main.cpp` define la especificación de cada columna (`struct ColumnSpec`,
-líneas 28-43):
+El `main.cpp` define la disposición de columnas con una `struct ColumnSpec` local
+(`key`, `title`, `width`, `fills`; líneas 20-25), volcada en la tabla `kColumns`:
 
 | Columna | Título | Ancho | ¿Rellena? |
 |---|---|---|---|
@@ -25,10 +25,11 @@ líneas 28-43):
 | `time` | TIME+ | 9 | no |
 | `command` | COMMAND | 16 | **sí** |
 
-El `TableController` recibe, por cada columna, una estructura `Column` con:
-`key`, `width`, `fills`, `min_width`, el `VBox` de filas y el `Button` de
-cabecera. En su constructor detecta cuál es la columna flexible (`flex_index_`)
-y cuál es la de comando (`marquee_index_`).
+El `TableController` recibe, por cada columna, su propio `ColumnSpec` (público,
+`table_controller.h`, líneas 69-76), con los campos `key`, `width`, `min_width`,
+`fills`, el `VBox` de filas (`rows`) y el `Button` de cabecera (`header`); el
+`main.cpp` los arma con campos con nombre. En su constructor detecta cuál es la
+columna flexible (`flex_index_`) y cuál es la de comando (`marquee_index_`).
 
 ## 7.2. Ordenamiento
 
@@ -39,15 +40,17 @@ La elección del orden inicial por PID es deliberada: ordenar por %CPU (el
 "top" obvio) reordena la tabla varias veces por segundo porque los deltas
 oscilan, y eso se percibe como parpadeo. El PID es un orden estable.
 
-- **`cycle_sort()`** (líneas 114-131): pasa a la siguiente columna, en orden
-  descendente; si se vuelve a elegir la columna activa, invierte la dirección.
-- **Clic en la cabecera** (`on_header_clicked`, líneas 274-289): activa esa
+- **`cycle_sort()`** (`table_controller.h`, líneas 92-109): pasa a la siguiente
+  columna, en orden descendente; si se vuelve a elegir la columna activa,
+  invierte la dirección.
+- **Clic en la cabecera** (`on_header_clicked`, líneas 234-249): activa esa
   columna o invierte su dirección. El `Button` de la cabecera es el disparador.
-- **`refresh_headers()`** (líneas 291-297): repinta las cabeceras resaltando la
+- **`refresh_headers()`** (líneas 251-255): repinta las cabeceras resaltando la
   columna activa.
 
-La comparación real la aporta `process_less()` (líneas 61-75), que es el
-"menor que" de cada clave. El `Monitor` lo usa para ordenar `visible_`.
+La comparación real la aporta `process_less()` (`src/Scripts/process_sort.h`,
+líneas 12-26), que es el "menor que" de cada clave. El `Monitor` lo usa para
+ordenar `visible_`.
 
 ## 7.3. Selección
 
@@ -58,10 +61,10 @@ justamente al ordenar por %CPU), un índice apuntaría a otro proceso; un PID no
 
 Métodos de selección:
 
-- **`select_by(delta, procs)`** (líneas 157-163): mueve el cursor `delta` filas,
+- **`select_by(delta, procs)`** (líneas 122-128): mueve el cursor `delta` filas,
   con recorte en los extremos.
-- **`select_to(index, procs)`** (líneas 167-171): selección absoluta, recortada.
-- **`select_at(point, procs)`** (líneas 176-186): selecciona la fila bajo un
+- **`select_to(index, procs)`** (líneas 131-135): selección absoluta, recortada.
+- **`select_at(point, procs)`** (líneas 139-149): selecciona la fila bajo un
   clic, probando contra el rectángulo del `VBox` de la primera columna (todas las
   columnas comparten las mismas filas).
 
@@ -82,25 +85,24 @@ la ventana visible, y en `render()` escribe el segmento
   ventana, el offset se ajusta para volver a mostrarla. Así el cursor nunca se
   pierde de vista.
 
-### `ensure_capacity()` (líneas 301-383)
+### `ensure_capacity()` (`table_controller.h`, líneas 260-324)
 
-Calcula `capacity_` y ajusta el pool. Dos detalles finos:
+Calcula `capacity_` y ajusta el pool. Mide el **terminal**, no los rectángulos ya
+resueltos: si usara los rectángulos del layout, la capacidad dependería de la
+capacidad anterior (el panel se dimensiona según su contenido) y la página podría
+crecer pero nunca encoger. El tamaño se lee con `terminal_rows()` /
+`terminal_cols()` (`src/Scripts/viewport.h`), el único valor de la cadena que el
+pool no infla.
 
-- **Mide el terminal, no los rectángulos ya resueltos.** Si usara los rectángulos
-  del layout, la capacidad dependería de la capacidad anterior (el panel se
-  dimensiona según su contenido), y la página podría crecer pero nunca
-  encoger. El tamaño real del terminal (`terminal_->get_screen_size`) es el
-  único valor de la cadena que el pool no infla.
-- **Aísla el "cromo"** (los bordes y todas las filas de layout por encima y por
-  debajo de la tabla) restando el tamaño mínimo del padre menos el de la tabla;
-  matemáticamente es la altura de lo que rodea a la tabla, sin depender de
-  cuántas filas haya.
-
-También recalcula el ancho de la columna flexible: parte del ancho de pantalla,
-resta los bordes dobles (el del panel exterior y el de la tabla), los espacios
-entre columnas y los anchos fijos, y aplica el mínimo de la columna. En un
-terminal angosto, la tabla se recorta en lugar de empujar las columnas finales
-fuera del borde.
+Con esos datos y el "cromo" (los bordes y todas las filas de layout por encima y
+por debajo de la tabla, aislado restando el tamaño mínimo del padre menos el de la
+tabla), `ensure_capacity()` delega en `compute_table_layout()`
+(`src/Scripts/table_layout.h`, líneas 21-42), que devuelve cuántas filas caben
+(`capacity`) y el ancho de la columna flexible (`flex_width`), o indica que no hay
+columna que rellenar (`has_flex`). Ese ancho parte del de pantalla, resta los
+bordes dobles (el del panel exterior y el de la tabla), los espacios entre columnas
+y los anchos fijos, y aplica el mínimo de la columna. En un terminal angosto, la
+tabla se recorta en lugar de empujar las columnas finales fuera del borde.
 
 ### Diferencia de texto
 
@@ -111,7 +113,8 @@ color de texto por estado se mantiene legible.
 
 ## 7.5. Colores por estado
 
-`row_color()` (líneas 54-58) decide el color del texto de una fila:
+`row_color()` (`src/Scripts/process_view.h`, líneas 34-38) decide el color del
+texto de una fila:
 
 - **Zombie** (`Z` / `X`) → rojo brillante.
 - **Dormido en disco** (`D`, esperando E/S) → amarillo brillante.

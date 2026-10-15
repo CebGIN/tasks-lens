@@ -20,19 +20,24 @@ Esta es exactamente la fórmula que fija el enunciado para el %CPU propio.
 
 ## 5.2. El `CpuSampler` (`src/Data/cpu_sampler.h` y `.cpp`)
 
-Es el único lugar donde se hacen estas cuentas. Su estado es únicamente el
-refresco previo, indexado por PID:
+Es el único lugar donde se hacen estas cuentas. Guarda el refresco previo: el
+total de CPU del sistema, su tiempo ocioso y el tiempo acumulado de cada proceso,
+indexado por PID:
 
 ```cpp
 std::uint64_t previous_total_cpu_ns_ = 0;
+std::uint64_t previous_idle_cpu_ns_ = 0;
 bool has_previous_total_ = false;
+double system_cpu_percent_ = 0.0;
 std::unordered_map<int, std::uint64_t> previous_cpu_ns_;
 ```
 
-El método `apply(system, processes)` hace, para cada proceso:
+El método `apply(system, processes)` hace primero la cuenta global y después la de
+cada proceso:
 
-1. Calcula `total_delta = system.total_cpu_time_ns - previous_total_cpu_ns_`,
-   pero solo si el total **avanzó** respecto del refresco anterior.
+1. Si `system.total_cpu_time_ns` **avanzó** respecto del refresco anterior,
+   calcula `total_delta = total_cpu_time_ns - previous_total_cpu_ns_` y, con el
+   delta de `idle_cpu_time_ns`, el porcentaje de toda la máquina (ver 5.3).
 2. Si hay delta válido y el proceso existía antes con un tiempo menor, calcula:
    ```
    cpu_percent = (cpu_time_ns - cpu_anterior) × 100 / total_delta
@@ -41,7 +46,11 @@ El método `apply(system, processes)` hace, para cada proceso:
    ```
    mem_percent = rss_bytes × 100 / mem_total
    ```
-4. Guarda el snapshot actual como nuevo punto de referencia.
+4. Guarda el snapshot actual (`total_cpu_time_ns`, `idle_cpu_time_ns` y el mapa por
+   PID) como nuevo punto de referencia.
+
+El porcentaje global se expone con el accesor `system_cpu_percent()`; el `Monitor`
+lo lee al componer el resumen.
 
 ### Casos especiales
 
@@ -49,7 +58,8 @@ El método `apply(system, processes)` hace, para cada proceso:
   `0 %`. Es lo honesto: todavía no hay nada que restar.
 - **Contador que retrocede o no avanza:** si `total_cpu_time_ns` no avanzó (o
   retrocedió, por ejemplo por un reinicio de contador), no hay denominador
-  válido y todos los `cpu_percent` quedan en `0` en lugar de dividir por cero.
+  válido, todos los `cpu_percent` quedan en `0` y el %CPU global conserva su
+  valor anterior, en lugar de dividir por cero.
 - **Proceso nuevo:** si no estaba en el mapa previo, su `cpu_percent` es `0`
   durante ese refresco.
 - **`mem_total` cero:** `mem_percent` queda en `0` en lugar de dividir por cero.
@@ -60,9 +70,9 @@ backend repite esta matemática.
 
 ## 5.3. %CPU global del sistema
 
-El resumen muestra un único porcentaje de CPU para toda la máquina. El
-`CpuSampler` no lo calcula; lo calcula el `Monitor::refresh()`
-(`src/Scripts/monitor.h`, líneas 304-317) con los dos contadores de `SystemInfo`:
+El resumen muestra un único porcentaje de CPU para toda la máquina. Lo calcula el
+propio `CpuSampler::apply()` (`src/Data/cpu_sampler.cpp`), dentro del mismo paso
+de dos refrescos, y lo expone con el accesor `system_cpu_percent()`:
 
 ```
              (Δtotal − Δidle)
@@ -73,7 +83,8 @@ El resumen muestra un único porcentaje de CPU para toda la máquina. El
 Es el mismo enfoque de dos refrescos, pero sobre la máquina completa: el tiempo
 ocioso se resta del total y lo que queda es el tiempo realmente ocupado. El
 denominador es el mismo `total_cpu_time_ns` que usa el %CPU por proceso, lo que
-hace que ambos sean consistentes.
+hace que ambos sean consistentes. El `Monitor` solo lo muestra en
+`update_summary()` (`src/Scripts/monitor.h`).
 
 ## 5.4. De dónde sale cada contador
 
@@ -90,23 +101,30 @@ En los dos sistemas, la unidad final es el nanosegundo, y por eso el mismo
 
 ## 5.5. Historial de CPU por proceso (elemento 7 del enunciado)
 
-El `Monitor` mantiene una serie por proceso para la vista de historial:
+El `Monitor` es dueño de un `HistoryStore history_`
+(`src/Data/history_store.h`), la clase que mantiene una serie por proceso para la
+vista de historial:
 
 ```cpp
-static constexpr std::size_t kHistorySamples = 120;
-std::unordered_map<int, std::deque<double>> history_;
+class HistoryStore {
+ public:
+  static constexpr std::size_t kSamples = 120;
+  void record(const std::vector<ProcessInfo>& processes);
+  const std::deque<double>* series(int pid) const;
+ private:
+  std::unordered_map<int, std::deque<double>> series_;
+};
 ```
 
-`record_history()` (líneas 329-345) se llama en cada refresco: agrega el
-`cpu_percent` actual a la serie del PID y recorta la serie a `kHistorySamples`
-(120 muestras). La clave es el **PID**, no la posición, para que la serie
-sobreviva a los reordenamientos de la tabla. Los procesos que ya no existen se
-eliminan del mapa.
-
+`history_.record(processes_)` se llama en cada refresco: agrega el `cpu_percent`
+actual a la serie de cada PID y recorta cada serie a `kSamples` (120 muestras).
 Con un intervalo de refresco de 1 segundo, 120 muestras son dos minutos de
-historial. La vista de historial dibuja la serie en un `Graph` con
-autoescalado: como un solo proceso suele estar cerca del 0 % de la máquina
-entera, un rango fijo de 0 a 100 aplanaría su variación por debajo de una celda.
+historial. La clave es el **PID**, no la posición, para que la serie sobreviva a
+los reordenamientos de la tabla. Los procesos que ya no existen se eliminan del
+mapa. La vista de historial pide la serie con `history_.series(pid)` y la dibuja
+en un `Graph` con autoescalado: como un solo proceso suele estar cerca del 0 % de
+la máquina entera, un rango fijo de 0 a 100 aplanaría su variación por debajo de
+una celda.
 
 Véase también: [03-backend-linux.md](03-backend-linux.md) para el origen de los
 números y [07-tabla-y-controlador.md](07-tabla-y-controlador.md) para cómo se

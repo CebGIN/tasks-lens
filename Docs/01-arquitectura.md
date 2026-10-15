@@ -12,7 +12,7 @@ El programa tiene tres capas bien separadas:
                                │  usa los tipos de datos
 ┌──────────────────────────────┴───────────────────────────────┐
 │  Datos (src/Data/)                                           │
-│  Tipos neutrales + interfaz ProcessSource + CpuSampler       │
+│  Tipos neutrales + ProcessSource + CpuSampler + HistoryStore │
 └──────────────────────────────┬───────────────────────────────┘
                                │  una implementación por sistema
 ┌──────────────────────────────┴───────────────────────────────┐
@@ -23,7 +23,9 @@ El programa tiene tres capas bien separadas:
 
 - **Datos**: define las estructuras (`ProcessInfo`, `ThreadInfo`, `SystemInfo`)
   y una interfaz abstracta, `ProcessSource`, que cada sistema operativo
-  implementa. Nada de esta capa conoce la interfaz gráfica ni el motor.
+  implementa. También aloja los ayudantes neutrales de cálculo: el `CpuSampler`
+  (porcentajes) y el `HistoryStore` (series de %CPU). Nada de esta capa conoce la
+  interfaz gráfica ni el motor.
 - **Backends**: traducen las estructuras nativas del sistema operativo
   (líneas de `/proc`, estructuras Win32) a los tipos neutrales. La única
   responsabilidad de un backend es *leer* y *actuar*; no calcula porcentajes.
@@ -39,15 +41,26 @@ backend normaliza el tiempo de CPU a nanosegundos, de modo que un único
 | Archivo | Responsabilidad |
 |---|---|
 | `src/main.cpp` | Construye el grafo de escena, arma la tabla, cablea los scripts y arranca el bucle. |
+| `src/dump.cpp` / `src/dump.h` | Ruta de verificación `--dump`: imprime un extracto tipo `top` por `stdout`. |
 | `src/Data/process_info.h` | Estructuras neutrales y `enum class ProcessState`. |
 | `src/Data/process_source.h` | Interfaz `ProcessSource` y declaración de la fábrica. |
 | `src/Data/process_source_factory.cpp` | Elige el backend según la plataforma. |
-| `src/Data/cpu_sampler.h/.cpp` | Convierte contadores acumulados en porcentajes entre refrescos. |
+| `src/Data/cpu_sampler.h/.cpp` | Convierte contadores acumulados en porcentajes entre refrescos (%CPU por proceso y global). |
+| `src/Data/history_store.h` | Series de %CPU por PID para la vista de historial. |
+| `src/Data/process_tree.h` | Árbol padre → hijo del snapshot (`build_process_tree_lines`). |
 | `src/Data/platform/linux/linux_process_source.cpp` | Backend de Linux (lee `/proc`). |
 | `src/Data/platform/windows/windows_process_source.cpp` | Backend de Windows (Tool Help / PSAPI). |
 | `src/Scripts/table_controller.h` | Orden, selección y ventana visible de la tabla. |
 | `src/Scripts/monitor.h` | El "cerebro": datos, atajos, acciones, vistas de detalle. |
-| `src/Scripts/format.h` | Formato de celdas (bytes, tiempo, porcentaje, relleno). |
+| `src/Scripts/table_layout.h` | Capacidad de filas y ancho de la columna flexible. |
+| `src/Scripts/process_view.h` | Texto y color de cada celda de la tabla. |
+| `src/Scripts/process_sort.h` | Comparador `process_less` por clave de columna. |
+| `src/Scripts/text_util.h` | Relleno y recorte de texto (`pad`, `truncate`, `clip_cells`, `pad_cells`). |
+| `src/Scripts/viewport.h` | Tamaño del terminal (`terminal_cols` / `terminal_rows`). |
+| `src/Scripts/format.h` | Formato de unidades (bytes, tiempo de CPU, porcentaje). |
+| `src/Scripts/priority_input.h` | Parseo y recorte del nice escrito (`parse_priority`). |
+| `src/Scripts/confirm_dialog.h` | Diálogo modal de confirmación (`build_confirm_dialog`). |
+| `src/Scripts/detail_overlay.h` | Panel de las vistas de detalle (`build_detail_overlay`). |
 | `src/Scripts/ui_style.h` | Un único aspecto para todos los botones de acción. |
 | `src/Scripts/marquee.h` | Desplazamiento horizontal del comando seleccionado. |
 
@@ -61,9 +74,10 @@ dos:
   cómo se ordenan, qué fila está seleccionada y cuántas filas caben. No lee datos
   del sistema operativo: recibe la lista ya filtrada y ordenada y la pinta.
 - **`Monitor`** — asociado a la raíz. Es dueño del `ProcessSource`, del
-  `CpuSampler` y del último snapshot. Cada refresco relee el sistema, y cada
-  fotograma ordena el snapshot y se lo entrega al `TableController`. También
-  gestiona los atajos, las acciones y las vistas de detalle.
+  `CpuSampler`, del `HistoryStore` y del último snapshot. Cada refresco relee el
+  sistema, y cada fotograma ordena el snapshot y se lo entrega al
+  `TableController`. También gestiona los atajos, las acciones y las vistas de
+  detalle.
 
 La división importa: `TableController` responde a *cómo se ve* la tabla (orden,
 desplazamiento, selección), mientras que `Monitor` responde a *qué datos hay* y
@@ -80,7 +94,7 @@ Cómo viaja un valor desde el núcleo hasta una celda de la pantalla:
         │  produce  std::vector<ProcessInfo>   (cpu_time_ns acumulado)
         │
  3. CpuSampler::apply()                    ← diferencia contra el refresco previo
-        │  rellena  cpu_percent y mem_percent
+        │  rellena  cpu_percent, mem_percent y el %CPU global del sistema
         │
  4. Monitor::refresh()                     ← guarda el snapshot en processes_
         │
@@ -88,7 +102,7 @@ Cómo viaja un valor desde el núcleo hasta una celda de la pantalla:
         │  produce  visible_
         │
  6. TableController::render()              ← escribe la ventana visible en etiquetas
-        │  (usa cell_text y format.h)
+        │  (usa cell_text de process_view.h, format.h y text_util.h)
         │
  7. guayaba::Label                         ← el motor lo dibuja en el terminal
 ```

@@ -14,6 +14,7 @@
 #include "Scripts/format.h"
 #include "Scripts/monitor.h"
 #include "Scripts/table_controller.h"
+#include "Scripts/ui_style.h"
 
 using namespace guayaba;
 
@@ -211,13 +212,57 @@ std::unique_ptr<Node> build_scene() {
   layout->set_anchor_preset(AnchorPreset::FullRect);
   layout->set_content_alignment(ContentAlignment::Begin);
 
-  // 1. Header & Title
-  NodeRef<Label> title = layout->add_child<Label>("title");
+  // 1. Title row: the title on the left, the global actions on the right. The
+  //    title grows into the free space so the buttons land against the right
+  //    edge (the same anchor + grow trick the table headers use inside a column).
+  NodeRef<HBox> title_row = layout->add_child<HBox>("title_row");
+  title_row->set_content_alignment(ContentAlignment::Begin);
+  title_row->set_separation(1);
+  // Fill the row's width (the cross axis of the layout VBox) so its children have
+  // leftover space to grow into; without this the row is only as wide as its
+  // children and nothing can be pushed to the right edge.
+  title_row->set_anchor_right(1.0f);
+  title_row->set_grow_x(Grow::Both);
+
+  NodeRef<Label> title = title_row->add_child<Label>("title");
   title->set_text({"tasks-lens — Process Monitor"});
   title->set_text_color(Color::BRIGHT_CYAN);
   title->set_fit_content(true);
+  title->set_anchor_right(1.0f);
+  title->set_grow_x(Grow::Both);
 
-  // 2. System summary (filled by the Monitor each refresh)
+  NodeRef<Button> btn_sort = tasks_lens::add_tool_button(title_row, "btn_sort", "Sort");
+  NodeRef<Button> btn_interval =
+      tasks_lens::add_tool_button(title_row, "btn_interval", "Interval");
+  NodeRef<Button> btn_quit = tasks_lens::add_tool_button(title_row, "btn_quit", "Quit");
+
+  // 2. Search bar: the name/user filter, always visible at the top. The LineEdit
+  //    takes the focus itself on click, so this is the mouse path into filtering.
+  NodeRef<HBox> search_row = layout->add_child<HBox>("search_row");
+  search_row->set_content_alignment(ContentAlignment::Begin);
+  search_row->set_separation(1);
+  search_row->set_anchor_right(1.0f);
+  search_row->set_grow_x(Grow::Both);
+
+  NodeRef<Label> search_label = search_row->add_child<Label>("search_label");
+  search_label->set_text({"Search:"});
+  search_label->set_text_color(Color::BRIGHT_WHITE);
+  search_label->set_fit_content(true);
+
+  NodeRef<LineEdit> prompt = search_row->add_child<LineEdit>("prompt");
+  prompt->set_anchor_right(1.0f);
+  prompt->set_grow_x(Grow::Both);
+  prompt->set_placeholder("name or user\u2026");
+  prompt->set_text_color(Color::BRIGHT_WHITE);
+  prompt->set_placeholder_color("BRIGHT_BLACK");
+  StyleBox prompt_box;
+  prompt_box.set_content_margin(1, 0, 1, 0);
+  prompt_box.set_background_color(Color::BLACK);
+  prompt->set_stylebox(prompt_box);
+
+  NodeRef<Button> btn_clear = tasks_lens::add_tool_button(search_row, "btn_clear", "Clear");
+
+  // 3. System summary (filled by the Monitor each refresh)
   NodeRef<Label> summary_tasks = layout->add_child<Label>("summary_tasks");
   summary_tasks->set_text({"Tasks: loading..."});
   summary_tasks->set_text_color(Color::WHITE);
@@ -228,31 +273,39 @@ std::unique_ptr<Node> build_scene() {
   summary_mem->set_text_color(Color::WHITE);
   summary_mem->set_fit_content(true);
 
-  // Highlights the row under the cursor; later the target of the actions.
-  NodeRef<Label> selection = layout->add_child<Label>("selection");
+  // 4. Action row: what is selected on the left, the process actions on the
+  //    right. The selection label grows so the buttons hug the right edge.
+  NodeRef<HBox> action_row = layout->add_child<HBox>("action_row");
+  action_row->set_content_alignment(ContentAlignment::Begin);
+  action_row->set_separation(1);
+  action_row->set_anchor_right(1.0f);
+  action_row->set_grow_x(Grow::Both);
+
+  NodeRef<Label> selection = action_row->add_child<Label>("selection");
   selection->set_text({"Selected: -"});
   selection->set_text_color(Color::BRIGHT_GREEN);
   selection->set_fit_content(true);
+  selection->set_anchor_right(1.0f);
+  selection->set_grow_x(Grow::Both);
 
-  // 3. Process table (headers double as sort buttons)
+  NodeRef<Button> btn_kill = tasks_lens::add_tool_button(action_row, "btn_kill", "Kill");
+  NodeRef<Button> btn_force = tasks_lens::add_tool_button(action_row, "btn_force", "Force");
+  NodeRef<Button> btn_stop = tasks_lens::add_tool_button(action_row, "btn_stop", "Stop");
+  NodeRef<Button> btn_cont = tasks_lens::add_tool_button(action_row, "btn_cont", "Cont");
+  NodeRef<Button> btn_nice = tasks_lens::add_tool_button(action_row, "btn_nice", "Nice");
+  NodeRef<Button> btn_threads =
+      tasks_lens::add_tool_button(action_row, "btn_threads", "Threads");
+  NodeRef<Button> btn_tree = tasks_lens::add_tool_button(action_row, "btn_tree", "Tree");
+  NodeRef<Button> btn_history =
+      tasks_lens::add_tool_button(action_row, "btn_history", "History");
+
+  // 5. Process table (headers double as sort buttons)
   TableParts parts = build_table(layout);
 
-  // 4. Help / status line at the bottom
+  // 6. Help / status line at the bottom
   NodeRef<Label> help = layout->add_child<Label>("help");
   help->set_text_color(Color::CYAN);
   help->set_fit_content(true);
-
-  // 5. Input line at the very bottom: the name filter (f) and the priority
-  // editor (p). Idle it shows its placeholder; while editing it holds the focus
-  // and the typed text, so the hotkeys never see those keys.
-  NodeRef<LineEdit> prompt = layout->add_child<LineEdit>("prompt");
-  prompt->set_placeholder("[/] filter   [p] priority");
-  prompt->set_text_color(Color::BRIGHT_WHITE);
-  prompt->set_placeholder_color("BRIGHT_BLACK");
-  StyleBox prompt_box;
-  prompt_box.set_content_margin(1, 0, 0, 0);
-  prompt_box.set_background_color(Color::BLACK);
-  prompt->set_stylebox(prompt_box);
 
   // The table owns sorting and the row window.
   NodeRef<PanelContainer> table = parts.table;
@@ -263,9 +316,24 @@ std::unique_ptr<Node> build_scene() {
   // The root owns the data and the hotkeys.
   std::unique_ptr<tasks_lens::ProcessSource> source =
       tasks_lens::create_system_process_source();
+
+  tasks_lens::MonitorToolbar toolbar;
+  toolbar.sort = btn_sort;
+  toolbar.interval = btn_interval;
+  toolbar.quit = btn_quit;
+  toolbar.clear = btn_clear;
+  toolbar.kill = btn_kill;
+  toolbar.force = btn_force;
+  toolbar.stop = btn_stop;
+  toolbar.cont = btn_cont;
+  toolbar.nice = btn_nice;
+  toolbar.threads = btn_threads;
+  toolbar.tree = btn_tree;
+  toolbar.history = btn_history;
+
   auto monitor_ref = root->attach_script<tasks_lens::Monitor>(
       std::move(source), summary_tasks, summary_mem, selection, help, prompt,
-      table, controller);
+      toolbar, table, controller);
   tasks_lens::Monitor* monitor = monitor_ref.script();
   if (monitor != nullptr) help->set_text(monitor->help_text());
 

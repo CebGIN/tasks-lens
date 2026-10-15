@@ -256,28 +256,44 @@ Each backend `.cpp` is `#ifdef`-guarded; the consumer `CMakeLists.txt` globs
     `Home/End` to the ends, the wheel moves it a few rows, and a left click on a
     data row selects it (a header click is consumed by its sort `Button` first).
   - **Actions on the cursor** (spec items 9/14/15): `k` → SIGTERM, `Shift+K` →
-    SIGKILL behind a separate `[y/N]` confirmation, `z` → SIGSTOP, `c` →
-    SIGCONT. `Shift+K` is detected via `event.text == U'K'` because the Linux
-    backend reports printable keys with `shift=false` (the shifted character is
-    already in `text`). A successful action sets `elapsed_ = interval_` so the
-    next `on_process` re-reads `/proc` immediately (the row disappears / the STATE
-    updates); a failure shows `PID N: failed (gone or no permission)` — the
-    backend returns one `bool`, so the two cases read the same to the user.
-    While a confirmation is pending its keys are swallowed and the status line
-    is not auto-cleared.
-  - **Input line** (`prompt`, an engine `LineEdit`, spec 10/13): `f` focuses it
-    as a live case-insensitive name/user filter; `p` focuses it as a priority
-    (nice) editor, left empty with the current value shown in the prompt.
-    `Enter` submits, `Escape` cancels. While focused it consumes typing, so the
-    hotkeys stay quiet and only `Escape` reaches the root script. The filter
-    drives `visible_` (the snapshot filtered + sorted); `processes_` stays the
-    full snapshot, and the table, cursor and actions all read `visible_`.
+    SIGKILL, `z` → SIGSTOP, `c` → SIGCONT. `Shift+K` is detected via
+    `event.text == U'K'` because the Linux backend reports printable keys with
+    `shift=false` (the shifted character is already in `text`). A successful
+    action sets `elapsed_ = interval_` so the next `on_process` re-reads `/proc`
+    immediately (the row disappears / the STATE updates); a failure shows
+    `PID N: failed (gone or no permission)` — the backend returns one `bool`, so
+    the two cases read the same to the user.
+  - **Force confirmation** (spec 14): a small modal overlay with **Yes/No
+    buttons** (the mouse path), plus `y`/`n`/`Escape` for the keyboard. It is a
+    `VBox(Center) > HBox(Center) > PanelContainer` so the box centres on both
+    axes; `confirm_pid_` doubles as "a prompt is up" and swallows every key.
+  - **Search bar** (top of the screen, `prompt`, an engine `LineEdit`, spec 13):
+    a live case-insensitive name/user filter. A click focuses it (the `LineEdit`
+    takes the focus itself), and `/` or `f` do too. Because the engine emits
+    `focus_entered`/`focus_exited` but does **not** declare them, the focus is
+    polled each frame (`sync_search_focus`) instead of connected: entering the
+    focus starts filter mode, leaving it keeps whatever was typed as the filter.
+    The filter drives `visible_` (the snapshot filtered + sorted); `processes_`
+    stays the full snapshot, and the table, cursor and actions all read
+    `visible_`. A `Clear` button empties it.
+  - **Priority editor** (spec 10): `p` (or the `Nice` button) reuses the same
+    top bar in a `Priority` mode — the field is emptied, the current nice goes in
+    the status line, and the displaced search text is restored on the way out.
+    `Enter` applies `set_priority`, clamped to `[-20, 19]`.
+  - **Toolbar** (`src/Scripts/ui_style.h` + `MonitorToolbar`): every key-only
+    action also has a `Button` — `Sort`, `Interval`, `Quit` on the title row and
+    `Kill/Force/Stop/Cont/Nice/Threads/Tree/History` on the action row — wired to
+    the same methods the hotkeys call. Process buttons are `set_disabled` when
+    nothing is selected (the engine's Disabled state), and `Sort`/`Interval`
+    show live labels. `apply_tool_button_style` is the single style source for
+    Normal/Hover/Pressed/Disabled.
   - **Detail views** (spec 5/6/7): `t` threads, `r` process tree, `g` CPU history.
     The engine has no node visibility, so each is a full-screen overlay
     `PanelContainer` built on demand, added to the root (draws on top, routes
-    input first) and `queue_free()`d on `Escape`. Threads/tree use an engine
-    `ListView`; history uses an engine `Graph` fed by `history_`, a capped CPU%
-    ring per pid keyed by pid so it survives the table's re-sorting.
+    input first) and `queue_free()`d on `Escape` or its `Close` button.
+    Threads/tree use an engine `ListView`; history uses an engine `Graph` fed by
+    `history_`, a capped CPU% ring per pid keyed by pid so it survives the
+    table's re-sorting.
 - `SystemInfo.idle_cpu_time_ns` (Linux idle+iowait, Windows idle) is what lets
   `Monitor` show overall `CPU: NN.N%` from `(Δtotal − Δidle)/Δtotal`.
 
@@ -287,6 +303,15 @@ A `PanelContainer` (or any `Control`) that is a `Grow::Both` child **must** also
 have `set_anchor_preset(AnchorPreset::FullRect)`. With default `TopLeft` anchors
 the grown size resolves against a zero-size anchor rect and the control stays at
 its minimum — this was why the table was one row tall until the preset was set.
+
+An `HBox` row that holds a growing label plus right-aligned buttons must itself
+fill the row width: `set_anchor_right(1.0f)` + `set_grow_x(Grow::Both)` on the
+`HBox`, or it stays only as wide as its children, the label has no slack to
+absorb, and the buttons pack against the text instead of the right edge. The
+overlay header has the same requirement. A label whose text can be long (the
+`Selected:` line, which carries a command path) must also be truncated: its
+`fit_content` minimum would otherwise exceed the row and shove the buttons off
+the right edge.
 
 ### Build note
 

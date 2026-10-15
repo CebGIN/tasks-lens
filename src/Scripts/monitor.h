@@ -19,8 +19,26 @@
 #include "Data/process_source.h"
 #include "Scripts/format.h"
 #include "Scripts/table_controller.h"
+#include "Scripts/ui_style.h"
 
 namespace tasks_lens {
+
+// The action buttons the Monitor wires and toggles. Grouped so the scene builder
+// hands them over as one value instead of a dozen constructor arguments.
+struct MonitorToolbar {
+  guayaba::NodeRef<guayaba::Button> sort;
+  guayaba::NodeRef<guayaba::Button> interval;
+  guayaba::NodeRef<guayaba::Button> quit;
+  guayaba::NodeRef<guayaba::Button> clear;
+  guayaba::NodeRef<guayaba::Button> kill;
+  guayaba::NodeRef<guayaba::Button> force;
+  guayaba::NodeRef<guayaba::Button> stop;
+  guayaba::NodeRef<guayaba::Button> cont;
+  guayaba::NodeRef<guayaba::Button> nice;
+  guayaba::NodeRef<guayaba::Button> threads;
+  guayaba::NodeRef<guayaba::Button> tree;
+  guayaba::NodeRef<guayaba::Button> history;
+};
 
 /*
     The monitor's brain, attached to the root node.
@@ -51,6 +69,7 @@ class Monitor : public guayaba::Script<guayaba::Node> {
           guayaba::NodeRef<guayaba::Label> selection,
           guayaba::NodeRef<guayaba::Label> status,
           guayaba::NodeRef<guayaba::LineEdit> prompt,
+          MonitorToolbar toolbar,
           guayaba::NodeRef<guayaba::PanelContainer> table,
           TableController* table_controller)
       : source_(std::move(source)),
@@ -59,16 +78,32 @@ class Monitor : public guayaba::Script<guayaba::Node> {
         selection_(selection),
         status_(status),
         prompt_(prompt),
+        toolbar_(toolbar),
         table_(table),
         table_controller_(table_controller) {}
 
-  // Wires the input field. Done here rather than in the scene builder because
-  // the Monitor is the one that knows what a submitted value means.
+  // Wires the input field and every toolbar button. Done here rather than in the
+  // scene builder because the Monitor is the one that knows what each one means.
   void on_attached() override {
     if (prompt_.get() != nullptr) {
       connect_script_signal("text_changed", prompt_.get(), this, &Monitor::on_prompt_changed);
       connect_script_signal("text_submitted", prompt_.get(), this, &Monitor::on_prompt_submitted);
     }
+
+    connect_clicked(toolbar_.sort, &Monitor::on_button_sort);
+    connect_clicked(toolbar_.interval, &Monitor::on_button_interval);
+    connect_clicked(toolbar_.quit, &Monitor::on_button_quit);
+    connect_clicked(toolbar_.clear, &Monitor::on_button_clear);
+    connect_clicked(toolbar_.kill, &Monitor::on_button_kill);
+    connect_clicked(toolbar_.force, &Monitor::on_button_force);
+    connect_clicked(toolbar_.stop, &Monitor::on_button_stop);
+    connect_clicked(toolbar_.cont, &Monitor::on_button_cont);
+    connect_clicked(toolbar_.nice, &Monitor::on_button_nice);
+    connect_clicked(toolbar_.threads, &Monitor::on_button_threads);
+    connect_clicked(toolbar_.tree, &Monitor::on_button_tree);
+    connect_clicked(toolbar_.history, &Monitor::on_button_history);
+
+    update_toolbar();
   }
 
   void on_process(double delta_time) override {
@@ -98,8 +133,15 @@ class Monitor : public guayaba::Script<guayaba::Node> {
       dirty_ = false;
     }
 
+    // Follows the search bar's focus so a click into it starts filtering.
+    sync_search_focus();
+
+
     if (table_controller_ != nullptr) table_controller_->render(visible_);
     update_selection();
+    // Button enablement and the live Sort/Interval labels track the selection and
+    // the sort/interval state, which can change from a key this same frame.
+    update_toolbar();
 
     if (view_ != ViewKind::None && content_dirty_) {
       update_overlay();
@@ -118,7 +160,7 @@ class Monitor : public guayaba::Script<guayaba::Node> {
 
   bool on_input(const guayaba::InputEvent& event) override {
     if (event.type == guayaba::InputEvent::Type::MOUSE_WHEEL) {
-      if (view_ == ViewKind::None && table_.get() != nullptr &&
+      if (view_ == ViewKind::None && confirm_pid_ == 0 && table_.get() != nullptr &&
           table_.get()->is_inside(event.mouse_pos)) {
         // The wheel moves the cursor rather than the window: the cursor is the
         // scroll anchor, so the two can never drift apart.
@@ -132,10 +174,15 @@ class Monitor : public guayaba::Script<guayaba::Node> {
     // consumed by the Button before it reaches this root script (controls
     // route before the root), so this only ever sees the rows.
     if (event.type == guayaba::InputEvent::Type::MOUSE_BUTTON) {
-      if (view_ == ViewKind::None && event.mouse_button == guayaba::MouseButton::LEFT &&
-          event.pressed && table_.get() != nullptr &&
-          table_.get()->is_inside(event.mouse_pos) && table_controller_ != nullptr) {
-        return table_controller_->select_at(event.mouse_pos, visible_);
+      if (view_ == ViewKind::None && confirm_pid_ == 0 &&
+          event.mouse_button == guayaba::MouseButton::LEFT && event.pressed &&
+          table_.get() != nullptr && table_.get()->is_inside(event.mouse_pos) &&
+          table_controller_ != nullptr) {
+        const bool hit = table_controller_->select_at(event.mouse_pos, visible_);
+        // Clicking away from the search bar finishes the edit, so the next keystroke
+        // is a hotkey again rather than another filter character.
+        if (hit) blur_search();
+        return hit;
       }
       return false;
     }
@@ -146,14 +193,11 @@ class Monitor : public guayaba::Script<guayaba::Node> {
     // so no other action can fire while the prompt is up.
     if (confirm_pid_ != 0) {
       if (event.key == guayaba::Key::Y) {
-        const int pid = confirm_pid_;
-        confirm_pid_ = 0;
-        terminate_pid(pid, true);
+        on_confirm_yes();
         return true;
       }
       if (event.key == guayaba::Key::N || event.key == guayaba::Key::ESCAPE) {
-        confirm_pid_ = 0;
-        set_message("Cancelled");
+        on_confirm_no();
         return true;
       }
       return true;
@@ -177,13 +221,19 @@ class Monitor : public guayaba::Script<guayaba::Node> {
       return true;
     }
 
+    // "/" is the usual "find" key; it focuses the same search bar f does. It has
+    // no Key of its own, so it is recognised by the character it produces.
+    if (event.text == U'/') {
+      enter_filter();
+      return true;
+    }
+
     switch (event.key) {
       case guayaba::Key::Q:
         guayaba::SceneManager::get_instance().stop_running();
         return true;
       case guayaba::Key::S:
-        if (table_controller_ != nullptr) table_controller_->cycle_sort();
-        set_message("Sort: " + sort_description());
+        cycle_sort_and_report();
         return true;
       case guayaba::Key::I:
         cycle_interval();
@@ -360,12 +410,12 @@ class Monitor : public guayaba::Script<guayaba::Node> {
     return contains_ci(proc.command, filter_) || contains_ci(proc.user, filter_);
   }
 
-  // --- Input line (filter / priority) ---------------------------------------
+  // --- Search bar (filter / priority) ---------------------------------------
 
   void enter_filter() {
     mode_ = InputMode::Filter;
     if (prompt_.get() != nullptr) {
-      prompt_.get()->set_placeholder("");
+      prompt_.get()->set_placeholder(kSearchHint);
       prompt_.get()->set_text(filter_);
       prompt_.get()->grab_focus();
     }
@@ -382,8 +432,8 @@ class Monitor : public guayaba::Script<guayaba::Node> {
     if (prompt_.get() != nullptr) {
       // Left empty rather than prefilled with the current nice: a prefilled value
       // would be edited at the caret, so typing "5" onto "0" would read 50. The
-      // current value goes in the prompt instead, and Enter applies what is typed.
-      prompt_.get()->set_placeholder("");
+      // current value goes in the status line instead, and Enter applies what is
+      // typed. The search text it displaces is restored on the way out.
       prompt_.get()->set_text("");
       prompt_.get()->grab_focus();
     }
@@ -399,13 +449,30 @@ class Monitor : public guayaba::Script<guayaba::Node> {
     leave_input_mode();
   }
 
+  // Leaves the field and puts the search text back, so an abandoned priority
+  // edit does not eat the filter.
   void leave_input_mode() {
     mode_ = InputMode::None;
     if (prompt_.get() != nullptr) {
+      prompt_.get()->set_placeholder(kSearchHint);
+      prompt_.get()->set_text(filter_);
       prompt_.get()->release_focus();
-      prompt_.get()->set_text("");
-      prompt_.get()->set_placeholder("[/] filter   [p] priority");
     }
+    refresh_help();
+  }
+
+  // Clicking a button or a row while the field holds the focus ends the edit.
+  // release_focus emits focus_exited, which is what actually resets the mode.
+  void blur_search() {
+    if (prompt_.get() != nullptr && prompt_.get()->is_focused()) {
+      prompt_.get()->release_focus();
+    }
+  }
+
+  void clear_filter() {
+    filter_.clear();
+    dirty_ = true;
+    if (prompt_.get() != nullptr) prompt_.get()->set_text("");
     refresh_help();
   }
 
@@ -426,6 +493,27 @@ class Monitor : public guayaba::Script<guayaba::Node> {
       filter_ = text;
       dirty_ = true;
       leave_input_mode();
+    }
+  }
+
+  // The LineEdit takes the focus on click itself, so filtering follows the focus
+  // rather than a key. The engine emits focus_entered/focus_exited but does not
+  // declare them, and connecting to an undeclared signal throws, so the focus is
+  // polled here instead: a click is the mouse path into filtering.
+  void sync_search_focus() {
+    if (prompt_.get() == nullptr) return;
+    const bool focused = prompt_.get()->is_focused();
+    if (focused && mode_ == InputMode::None) {
+      mode_ = InputMode::Filter;
+      prompt_.get()->set_placeholder(kSearchHint);
+      refresh_help();
+    } else if (!focused && mode_ != InputMode::None) {
+      // The edit is over (focus moved away or was released): keep whatever was
+      // typed as the filter and put the search text back.
+      mode_ = InputMode::None;
+      prompt_.get()->set_placeholder(kSearchHint);
+      prompt_.get()->set_text(filter_);
+      refresh_help();
     }
   }
 
@@ -490,7 +578,9 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   }
 
   // Mirrors the highlighted row into its own label, which is also where the
-  // actions and the priority editor will read their target from.
+  // actions and the priority editor will read their target from. The command is
+  // truncated: a long path would make the label's minimum wider than the row and
+  // shove the action buttons past the right edge.
   void update_selection() {
     if (selection_.get() == nullptr) return;
     std::string text = "Selected: -";
@@ -498,13 +588,22 @@ class Monitor : public guayaba::Script<guayaba::Node> {
       const int index = table_controller_->selected_index();
       if (index >= 0 && index < static_cast<int>(visible_.size())) {
         const ProcessInfo& proc = visible_[static_cast<std::size_t>(index)];
-        text = "Selected PID " + std::to_string(proc.pid) + "  " + proc.command;
+        text = "Selected PID " + std::to_string(proc.pid) + "  " +
+               truncate(proc.command, 24);
       }
     }
     if (text != selection_text_) {
       selection_.get()->set_text(text);
       selection_text_ = text;
     }
+  }
+
+  // Shortens `text` to at most `max` bytes, ending in an ellipsis when it had to
+  // cut. Byte-based on purpose: it bounds the label's minimum width, which is
+  // what the layout needs, and commands are almost always ASCII.
+  static std::string truncate(const std::string& text, std::size_t max) {
+    if (text.size() <= max) return text;
+    return text.substr(0, max) + "\u2026";
   }
 
   // The row under the cursor, or nullptr when there is none. Every action is
@@ -541,9 +640,99 @@ class Monitor : public guayaba::Script<guayaba::Node> {
       set_message("No process selected");
       return;
     }
-    confirm_pid_ = proc->pid;
-    set_message("SIGKILL PID " + std::to_string(proc->pid) + " (" + proc->command +
-                ")? [y/N]");
+    open_confirm(proc->pid, true);
+  }
+
+  // Force kill cannot be undone, so it asks first. The confirmation is a small
+  // modal overlay with Yes/No buttons - the mouse path - while y/n/Escape still
+  // work for the keyboard. Built like the detail views (an overlay added to the
+  // root and queue_free()d), and confirm_pid_ doubles as "a prompt is up".
+  void open_confirm(int pid, bool force) {
+    close_confirm();
+    confirm_pid_ = pid;
+    confirm_force_ = force;
+
+    std::string command;
+    for (const ProcessInfo& proc : processes_) {
+      if (proc.pid == pid) {
+        command = proc.command;
+        break;
+      }
+    }
+
+    guayaba::NodeRef<guayaba::PanelContainer> overlay =
+        node->add_child<guayaba::PanelContainer>("confirm");
+    overlay->set_anchor_preset(guayaba::AnchorPreset::FullRect);
+    overlay->set_clip_children(true);
+    overlay->get_stylebox().set_background_color(guayaba::Color::BLACK);
+    overlay->get_stylebox().set_content_margin(0, 0, 0, 0);
+
+    // VBox(Center) + HBox(Center) is what centres a small box on both axes: a
+    // container centres its block along its own main axis, so the nesting does it.
+    guayaba::NodeRef<guayaba::VBox> outer =
+        overlay->add_child<guayaba::VBox>("confirm_outer");
+    outer->set_anchor_preset(guayaba::AnchorPreset::FullRect);
+    outer->set_content_alignment(guayaba::ContentAlignment::Center);
+
+    guayaba::NodeRef<guayaba::HBox> middle =
+        outer->add_child<guayaba::HBox>("confirm_middle");
+    middle->set_content_alignment(guayaba::ContentAlignment::Center);
+
+    guayaba::NodeRef<guayaba::PanelContainer> box =
+        middle->add_child<guayaba::PanelContainer>("confirm_box");
+    box->set_custom_minimum_size(guayaba::Vec2{54, 0});
+    box->get_stylebox().set_background_color(guayaba::Color::BLACK);
+    box->get_stylebox().set_border_style(guayaba::StyleBorder::DOUBLE);
+    box->get_stylebox().set_border_width(1);
+    box->get_stylebox().set_border_color(guayaba::Color::BRIGHT_RED);
+    box->get_stylebox().set_content_margin(1, 0, 1, 0);
+
+    guayaba::NodeRef<guayaba::VBox> inner =
+        box->add_child<guayaba::VBox>("confirm_inner");
+    inner->set_content_alignment(guayaba::ContentAlignment::Center);
+    inner->set_separation(1);
+
+    guayaba::NodeRef<guayaba::Label> message =
+        inner->add_child<guayaba::Label>("confirm_message");
+    message->set_fit_content(true);
+    message->set_text_color(guayaba::Color::BRIGHT_WHITE);
+    message->set_text(std::string(force ? "Force kill" : "Terminate") + " PID " +
+                      std::to_string(pid) +
+                      (command.empty() ? "" : " (" + truncate(command, 32) + ")") +
+                      "?");
+
+    guayaba::NodeRef<guayaba::HBox> buttons =
+        inner->add_child<guayaba::HBox>("confirm_buttons");
+    buttons->set_content_alignment(guayaba::ContentAlignment::Center);
+    buttons->set_separation(2);
+
+    guayaba::NodeRef<guayaba::Button> yes =
+        tasks_lens::add_tool_button(buttons, "confirm_yes", "Yes");
+    guayaba::NodeRef<guayaba::Button> no =
+        tasks_lens::add_tool_button(buttons, "confirm_no", "No");
+    connect_clicked(yes, &Monitor::on_confirm_yes);
+    connect_clicked(no, &Monitor::on_confirm_no);
+
+    confirm_overlay_ = overlay;
+  }
+
+  void close_confirm() {
+    confirm_pid_ = 0;
+    confirm_force_ = false;
+    if (confirm_overlay_.get() != nullptr) confirm_overlay_.get()->queue_free();
+    confirm_overlay_ = {};
+  }
+
+  void on_confirm_yes() {
+    const int pid = confirm_pid_;
+    const bool force = confirm_force_;
+    close_confirm();
+    if (pid != 0) terminate_pid(pid, force);
+  }
+
+  void on_confirm_no() {
+    close_confirm();
+    set_message("Cancelled");
   }
 
   void set_suspended(bool suspend) {
@@ -569,6 +758,76 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   // wording covers both.
   std::string report_failure(int pid) const {
     return "PID " + std::to_string(pid) + ": failed (gone or no permission)";
+  }
+
+  // --- Toolbar buttons ------------------------------------------------------
+
+  void connect_clicked(guayaba::NodeRef<guayaba::Button>& btn, void (Monitor::*slot)()) {
+    if (btn.get() != nullptr) connect_script_signal("clicked", btn.get(), this, slot);
+  }
+
+  void cycle_sort_and_report() {
+    if (table_controller_ != nullptr) table_controller_->cycle_sort();
+    set_message("Sort: " + sort_description());
+  }
+
+  // Every handler blurs the search first, so a click finishes an in-progress edit
+  // and the next keystroke is a hotkey rather than a filter character.
+  void on_button_sort() { blur_search(); cycle_sort_and_report(); }
+  void on_button_interval() { blur_search(); cycle_interval(); }
+  void on_button_quit() { guayaba::SceneManager::get_instance().stop_running(); }
+  void on_button_clear() { blur_search(); clear_filter(); }
+  void on_button_kill() { blur_search(); terminate_selected(false); }
+  void on_button_force() { blur_search(); request_force_kill(); }
+  void on_button_stop() { blur_search(); set_suspended(true); }
+  void on_button_cont() { blur_search(); set_suspended(false); }
+  void on_button_nice() { blur_search(); enter_priority(); }
+  void on_button_threads() { blur_search(); open_threads(); }
+  void on_button_tree() { blur_search(); open_tree(); }
+  void on_button_history() { blur_search(); open_history(); }
+  void on_button_overlay_close() { close_overlay(); }
+
+  // Runs every frame: greys the process actions when nothing is selected, and
+  // keeps the Sort/Interval labels current. The text setters are guarded so a
+  // Button is not re-wrapped 30 times a second.
+  void update_toolbar() {
+    const bool has_selection = selected_process() != nullptr;
+    set_enabled(toolbar_.kill, has_selection);
+    set_enabled(toolbar_.force, has_selection);
+    set_enabled(toolbar_.stop, has_selection);
+    set_enabled(toolbar_.cont, has_selection);
+    set_enabled(toolbar_.nice, has_selection);
+    set_enabled(toolbar_.threads, has_selection);
+    set_enabled(toolbar_.tree, has_selection);
+    set_enabled(toolbar_.history, has_selection);
+
+    const std::string sort_label = sort_button_label();
+    if (sort_label != last_sort_label_ && toolbar_.sort.get() != nullptr) {
+      last_sort_label_ = sort_label;
+      toolbar_.sort.get()->set_text(sort_label);
+    }
+    const std::string interval_label = interval_button_label();
+    if (interval_label != last_interval_label_ && toolbar_.interval.get() != nullptr) {
+      last_interval_label_ = interval_label;
+      toolbar_.interval.get()->set_text(interval_label);
+    }
+  }
+
+  static void set_enabled(guayaba::NodeRef<guayaba::Button>& btn, bool enabled) {
+    if (btn.get() != nullptr) btn.get()->set_disabled(!enabled);
+  }
+
+  std::string sort_button_label() const {
+    if (table_controller_ == nullptr) return "Sort";
+    std::string key = table_controller_->sort_key();
+    for (char& ch : key) {
+      ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    }
+    return "Sort: " + key + (table_controller_->ascending() ? " \u2191" : " \u2193");
+  }
+
+  std::string interval_button_label() const {
+    return "Every " + std::to_string(static_cast<int>(interval_)) + "s";
   }
 
   // --- Detail views (threads, tree, history) --------------------------------
@@ -614,10 +873,26 @@ class Monitor : public guayaba::Script<guayaba::Node> {
     box->set_content_alignment(guayaba::ContentAlignment::Begin);
     box->set_separation(1);
 
+    guayaba::NodeRef<guayaba::HBox> header =
+        box->add_child<guayaba::HBox>("overlay_header");
+    header->set_content_alignment(guayaba::ContentAlignment::Begin);
+    header->set_separation(1);
+    // Fill the overlay's width so the title can grow and push Close to the right
+    // edge; without it the header is only as wide as its children.
+    header->set_anchor_right(1.0f);
+    header->set_grow_x(guayaba::Grow::Both);
+
     guayaba::NodeRef<guayaba::Label> title =
-        box->add_child<guayaba::Label>("overlay_title");
+        header->add_child<guayaba::Label>("overlay_title");
     title->set_fit_content(true);
     title->set_text_color(guayaba::Color::BRIGHT_CYAN);
+    title->set_anchor_right(1.0f);
+    title->set_grow_x(guayaba::Grow::Both);
+
+    guayaba::NodeRef<guayaba::Button> close =
+        tasks_lens::add_tool_button(header, "overlay_close", "Close");
+    connect_clicked(close, &Monitor::on_button_overlay_close);
+    overlay_close_ = close;
 
     if (kind == ViewKind::History) {
       guayaba::NodeRef<guayaba::Graph> graph =
@@ -653,6 +928,7 @@ class Monitor : public guayaba::Script<guayaba::Node> {
     overlay_title_ = {};
     overlay_list_ = {};
     overlay_graph_ = {};
+    overlay_close_ = {};
   }
 
   // Refills the open view from the data. Called on open and whenever the
@@ -772,6 +1048,7 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   std::string selection_text_;
   guayaba::NodeRef<guayaba::Label> status_;
   guayaba::NodeRef<guayaba::LineEdit> prompt_;
+  MonitorToolbar toolbar_;
   guayaba::NodeRef<guayaba::PanelContainer> table_;
   TableController* table_controller_ = nullptr;
 
@@ -785,6 +1062,12 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   guayaba::NodeRef<guayaba::Label> overlay_title_;
   guayaba::NodeRef<guayaba::ListView> overlay_list_;
   guayaba::NodeRef<guayaba::Graph> overlay_graph_;
+  guayaba::NodeRef<guayaba::Button> overlay_close_;
+
+  // The force-kill confirmation popup, and whether it is a force (vs a plain
+  // terminate). confirm_pid_ below doubles as "a prompt is up".
+  guayaba::NodeRef<guayaba::PanelContainer> confirm_overlay_;
+  bool confirm_force_ = false;
 
   // One capped CPU% series per pid, for the history view (spec 7). Keyed by pid
   // so it survives the table's re-sorting, and pruned when a process exits.
@@ -801,6 +1084,9 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   bool content_dirty_ = true;
   std::string last_sort_key_;
   bool last_ascending_ = true;
+  // Guards for the toolbar's live labels, so set_text only runs on a real change.
+  std::string last_sort_label_;
+  std::string last_interval_label_;
 
   double interval_ = 1.0;
   int interval_index_ = 0;
@@ -813,11 +1099,15 @@ class Monitor : public guayaba::Script<guayaba::Node> {
   bool has_previous_ = false;
 
   double message_timer_ = 0.0;
-  // PID awaiting a y/n answer for a forced termination; 0 when no prompt is up.
+  // PID awaiting a confirmation; 0 when no prompt is up. Set by open_confirm()
+  // and read by both the popup's buttons and the y/n/Escape keys.
   int confirm_pid_ = 0;
+
+  // The search bar's resting hint, shown while the field is empty.
+  static constexpr const char* kSearchHint = "name or user\u2026";
   std::string help_text_ =
-      "q Quit  s Sort  i Int  \u2191\u2193 Move  f Filter  p Nice  t Threads  "
-      "r Tree  g Hist  k Kill  K Force  z Stop  c Cont";
+      "/ Search  s Sort  i Int  \u2191\u2193 Move  p Nice  t Thr  r Tree  g Hist  "
+      "k Kill  K Force  z Stop  c Cont  q Quit";
 };
 
 }  // namespace tasks_lens
